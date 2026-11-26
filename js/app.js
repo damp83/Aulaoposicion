@@ -4,7 +4,7 @@
   "use strict";
 
   const T = window.TEMARIO;
-  const STORE_KEY = "aulachs:v1";
+  const STORE_KEY = "aulachs:v2"; // v2: temario de M2 Química (los identificadores de tema cambiaron)
   const LETTERS = ["A", "B", "C", "D", "E", "F"];
   const $main = document.getElementById("app");
 
@@ -39,7 +39,12 @@
   }
 
   // ─────────────────────────── Banco de preguntas ───────────────────────────
-  const temaById = {}; T.temas.forEach((t, i) => { t.n = i + 1; temaById[t.id] = t; });
+  const temaById = {};
+  const PREFIJO = { C: "Común", Q: "Química", X: "Compl." };
+  T.bloques.forEach((b) => T.temas.filter((t) => t.bloque === b.id).forEach((t, i) => { t.n = i + 1; t.label = (PREFIJO[b.id] || b.id) + " " + t.n; }));
+  T.temas.forEach((t) => { temaById[t.id] = t; });
+  const bloqueById = {}; T.bloques.forEach((b) => (bloqueById[b.id] = b));
+  const oficialIds = () => T.temas.filter((t) => bloqueById[t.bloque].oficial).map((t) => t.id);
 
   function allQuestions() {
     const out = [];
@@ -62,18 +67,40 @@
   let timerId = null;
 
   function startTest(opts) {
-    let qs = opts.questions.slice();
-    if (opts.limit && qs.length > opts.limit) qs = shuffle(qs).slice(0, opts.limit); else qs = shuffle(qs);
-    if (!qs.length) { toast("No hay preguntas para ese test"); return; }
+    // opts.partes: [{ nombre, questions, n, max }] para exámenes con partes que puntúan por separado
+    const partes = opts.partes || [{ nombre: null, questions: opts.questions, n: opts.limit }];
+    const items = [];
+    partes.forEach((p, pi) => {
+      let qs = shuffle(p.questions);
+      if (p.n && qs.length > p.n) qs = qs.slice(0, p.n);
+      qs.forEach((q) => {
+        const order = shuffle(q.o.map((_, i) => i));
+        items.push({ q, order, correct: order.indexOf(0), answer: null, flagged: false, parte: pi });
+      });
+    });
+    if (!items.length) { toast("No hay preguntas para ese test"); return; }
     session = {
       titulo: opts.titulo, mode: opts.mode, penalty: opts.penalty || 0, back: opts.back || "temario",
+      partes: opts.partes ? opts.partes.map((p) => ({ nombre: p.nombre, max: p.max || 20 })) : null,
+      oficial: !!opts.oficial,
       limitSecs: opts.minutes ? opts.minutes * 60 : 0, start: Date.now(), current: 0, finished: false, confirm: false,
-      items: qs.map((q) => {
-        const order = shuffle(q.o.map((_, i) => i));
-        return { q, order, correct: order.indexOf(0), answer: null, flagged: false };
-      })
+      items
     };
     go("test");
+  }
+
+  // Primer ejercicio M2: 45 preguntas del temario común + 45 del específico, 90 min, −1/3, 20 + 20 puntos
+  function startOficial() {
+    const cfg = T.convocatoria.simulacro;
+    const parte = (pid) => allQuestions().filter((q) => bloqueById[temaById[q.tema].bloque].parte === pid);
+    startTest({
+      titulo: "Simulacro oficial · primer ejercicio", mode: "examen", oficial: true,
+      minutes: cfg.minutos, penalty: cfg.penalizacion, back: "simulacro",
+      partes: [
+        { nombre: "Parte común", questions: parte("comun"), n: cfg.comun, max: cfg.maxParte },
+        { nombre: "Parte específica", questions: parte("especifico"), n: cfg.especifico, max: cfg.maxParte }
+      ]
+    });
   }
 
   function answerCurrent(idx) {
@@ -103,7 +130,7 @@
     session.secs = Math.round((Date.now() - session.start) / 1000);
     if (session.mode === "examen") session.items.forEach((it) => { if (it.answer !== null) recordAnswer(it); });
     const r = result(session);
-    state.history.unshift({ ts: Date.now(), titulo: session.titulo, mode: session.mode, n: r.n, ok: r.ok, ko: r.ko, blank: r.blank, nota: r.nota, secs: session.secs });
+    state.history.unshift({ ts: Date.now(), titulo: session.titulo, mode: session.mode, n: r.n, ok: r.ok, ko: r.ko, blank: r.blank, nota: r.nota, secs: session.secs, total40: r.partes ? r.total : undefined });
     state.history = state.history.slice(0, 200);
     save();
     go("resultado");
@@ -116,7 +143,19 @@
     const ko = n - ok - blank;
     const puntos = ok - ko * s.penalty;
     const nota = Math.max(0, (puntos / n) * 10);
-    return { n, ok, ko, blank, puntos, nota };
+    let partes = null, total = 0;
+    if (s.partes) {
+      partes = s.partes.map((p, pi) => {
+        const its = s.items.filter((it) => it.parte === pi);
+        const pok = its.filter((it) => it.answer !== null && it.answer === it.correct).length;
+        const pblank = its.filter((it) => it.answer === null).length;
+        const pko = its.length - pok - pblank;
+        const pts = Math.max(0, ((pok - pko * s.penalty) / its.length) * p.max);
+        total += pts;
+        return { nombre: p.nombre, n: its.length, ok: pok, ko: pko, blank: pblank, pts, max: p.max };
+      });
+    }
+    return { n, ok, ko, blank, puntos, nota, partes, total };
   }
 
   // ─────────────────────────── Router ───────────────────────────
@@ -139,6 +178,7 @@
       case "fallos": return renderFallos();
       case "progreso": return renderProgreso();
       case "mis-preguntas": return renderPropias();
+      case "convocatoria": return renderConvocatoria();
       case "test": return session && !session.finished ? renderTest() : go("inicio");
       case "resultado": return session && session.finished ? renderResultado() : go("inicio");
       default: return renderInicio();
@@ -161,13 +201,13 @@
 
     setView(`
       <section class="stack">
-        <span class="eyebrow">Confederación Hidrográfica del Segura · Preparación de oposiciones</span>
-        <h1>Estudia el temario y practica con tests tema a tema</h1>
-        <p class="lead">${T.temas.length} temas en ${T.bloques.length} bloques y ${qs.length} preguntas con su explicación. Tu progreso se guarda en este navegador.</p>
+        <span class="eyebrow">${esc(T.convocatoria.plaza)} · ${esc(T.convocatoria.organismo)}</span>
+        <h1>Prepara el examen de M2 Química de la Confederación Hidrográfica del Segura</h1>
+        <p class="lead">Temario oficial de la convocatoria (15 temas comunes y 32 específicos de Química), más un bloque complementario sobre aguas y laboratorio. ${qs.length} preguntas con explicación. Tu progreso se guarda en este navegador.</p>
         <div class="row">
           ${pending ? `<a class="btn btn-ochre" href="#test">Continuar test: ${esc(session.titulo)}</a>` : ""}
-          <button class="btn btn-primary" id="quick">Test rápido · 10 preguntas</button>
-          <a class="btn" href="#simulacro">Simulacro de examen</a>
+          <button class="btn btn-primary" id="oficial">Simulacro oficial · 90 preguntas</button>
+          <button class="btn" id="quick">Test rápido · 10 preguntas</button>
           ${fallos ? `<a class="btn" href="#fallos">Repasar ${fallos} fallos</a>` : ""}
         </div>
       </section>
@@ -176,15 +216,17 @@
         <div class="kpi"><div class="value">${pct(dominadas, qs.length)}<small>%</small></div><div class="label">Temario dominado (${dominadas}/${qs.length})</div></div>
         <div class="kpi"><div class="value">${pct(ok, ok + ko)}<small>%</small></div><div class="label">Acierto global</div></div>
         <div class="kpi"><div class="value">${state.history.length}</div><div class="label">Tests realizados</div></div>
-        <div class="kpi"><div class="value">${last ? fmt1(last.nota) : "—"}</div><div class="label">Nota del último test</div></div>
+        <div class="kpi"><div class="value">${last ? fmt1(last.nota) : "—"}</div><div class="label">Nota del último test (sobre 10)</div></div>
       </section>
+
+      ${examCard()}
 
       ${weak.length ? `
       <section class="stack">
         <h2>Temas a reforzar</h2>
         <div class="grid">${weak.map(({ t, s }) => `
           <a class="panel-flat" href="#tema-${t.id}" style="text-decoration:none;color:inherit;display:flex;flex-direction:column;gap:8px">
-            <span class="eyebrow">Tema ${t.n}</span><strong>${esc(t.titulo)}</strong>
+            <span class="eyebrow">${t.label}</span><strong>${esc(t.titulo)}</strong>
             <div class="gauge ${gaugeClass(s.acierto)}"><span style="width:${s.acierto}%"></span></div>
             <span class="muted" style="font-size:.88rem">${s.acierto}% de acierto en ${s.ok + s.ko} respuestas</span>
           </a>`).join("")}</div>
@@ -197,7 +239,7 @@
           const st = temas.map((t) => temaStats(t.id));
           const tot = st.reduce((a, s) => a + s.total, 0), dom = st.reduce((a, s) => a + s.dominadas, 0);
           return `<div class="panel-flat stack" style="gap:8px">
-            <span class="eyebrow">Bloque ${b.id.slice(1)} · ${temas.length} temas</span>
+            <span class="eyebrow">${b.oficial ? "Entra en el examen" : "No entra en el examen"} · ${temas.length} temas</span>
             <strong>${esc(b.nombre)}</strong>
             <div class="gauge"><span style="width:${pct(dom, tot)}%"></span></div>
             <span class="muted num" style="font-size:.85rem">${dom}/${tot} preguntas dominadas</span>
@@ -205,7 +247,10 @@
         }).join("")}</div>
       </section>
     `);
-    document.getElementById("quick").onclick = () => startTest({ questions: qs, limit: 10, mode: "estudio", titulo: "Test rápido", back: "inicio" });
+    const ofi = oficialIds();
+    document.getElementById("quick").onclick = () => startTest({ questions: qs.filter((q) => ofi.includes(q.tema)), limit: 10, mode: "estudio", titulo: "Test rápido", back: "inicio" });
+    document.getElementById("oficial").onclick = startOficial;
+    bindExamCard();
   }
 
   function renderTemario() {
@@ -217,7 +262,7 @@
       </section>
       ${T.bloques.map((b) => `
         <section class="bloque">
-          <div class="bloque-head"><span class="eyebrow">Bloque ${b.id.slice(1)}</span><h2>${esc(b.nombre)}</h2></div>
+          <div class="bloque-head"><span class="eyebrow">${b.oficial ? "Temario oficial" : "No entra en el examen"}</span><h2>${esc(b.nombre)}</h2></div>
           ${T.temas.filter((t) => t.bloque === b.id).map((t) => {
             const s = temaStats(t.id);
             return `<a class="tema-row" href="#tema-${t.id}">
@@ -242,7 +287,7 @@
     setView(`
       <section class="stack">
         <a href="#temario" class="muted" style="font-size:.92rem">← Temario</a>
-        <span class="eyebrow">Tema ${t.n} · ${esc(bloque.nombre)}</span>
+        <span class="eyebrow">${t.label} · ${esc(bloque.nombre)}</span>
         <h1>${esc(t.titulo)}</h1>
         <p class="muted">${esc(t.norma)}</p>
       </section>
@@ -271,14 +316,68 @@
       </section>
 
       <nav class="row" style="justify-content:space-between">
-        ${prev ? `<a class="btn btn-ghost" href="#tema-${prev.id}">← Tema ${prev.n}</a>` : "<span></span>"}
-        ${next ? `<a class="btn btn-ghost" href="#tema-${next.id}">Tema ${next.n} →</a>` : ""}
+        ${prev ? `<a class="btn btn-ghost" href="#tema-${prev.id}">← ${prev.label}</a>` : "<span></span>"}
+        ${next ? `<a class="btn btn-ghost" href="#tema-${next.id}">${next.label} →</a>` : ""}
       </nav>
     `);
-    const titulo = "Tema " + t.n + ": " + t.titulo;
+    const titulo = t.label + ": " + t.titulo;
     document.getElementById("estudio").onclick = () => startTest({ questions: qs, mode: "estudio", titulo, back: "tema-" + id });
     document.getElementById("examen").onclick = () => startTest({ questions: qs, mode: "examen", minutes: qs.length, penalty: 1 / 3, titulo, back: "tema-" + id });
     document.getElementById("rfallos").onclick = () => startTest({ questions: fallos, mode: "estudio", titulo: titulo + " (falladas)", back: "tema-" + id });
+  }
+
+  function examCard() {
+    const c = T.convocatoria, cfg = c.simulacro;
+    const n = (pid) => allQuestions().filter((q) => bloqueById[temaById[q.tema].bloque].parte === pid).length;
+    return `<section class="panel stack">
+      <div class="row" style="justify-content:space-between">
+        <div class="stack" style="gap:4px"><span class="eyebrow">Primer ejercicio · ${esc(c.plaza)}</span>
+          <h2>Simulacro oficial</h2></div>
+        <a href="#convocatoria" style="font-size:.92rem">Ver la convocatoria</a>
+      </div>
+      <div class="kpis">
+        <div class="kpi"><div class="value">${cfg.comun}</div><div class="label">Preguntas del temario común (banco: ${n("comun")})</div></div>
+        <div class="kpi"><div class="value">${cfg.especifico}</div><div class="label">Preguntas de Química (banco: ${n("especifico")})</div></div>
+        <div class="kpi"><div class="value">${cfg.minutos}′</div><div class="label">Tiempo máximo</div></div>
+        <div class="kpi"><div class="value">−1/3</div><div class="label">Por error · en blanco no penaliza</div></div>
+      </div>
+      <p class="muted" style="font-size:.92rem">Cada parte se puntúa sobre ${cfg.maxParte}; hacen falta ${cfg.minimo} de ${cfg.maxParte * 2} puntos para superar el ejercicio.</p>
+      <div><button class="btn btn-primary" data-oficial>Empezar simulacro oficial</button></div>
+    </section>`;
+  }
+  function bindExamCard() { $main.querySelectorAll("[data-oficial]").forEach((b) => (b.onclick = startOficial)); }
+
+  function renderConvocatoria() {
+    const c = T.convocatoria;
+    setView(`
+      <section class="stack">
+        <span class="eyebrow">Convocatoria</span>
+        <h1>${esc(c.plaza)} · ${esc(c.organismo)}</h1>
+        <p class="lead">${esc(c.titulo)}. ${esc(c.resolucion)}.</p>
+      </section>
+      <section class="stack">
+        <h2>Tu plaza</h2>
+        <div class="panel-flat table-wrap"><table>
+          <thead><tr><th>N.º</th><th>Puesto</th><th>Destino</th><th class="num">Ámbito</th></tr></thead>
+          <tbody>${c.puestos.map((p) => `<tr><td class="num">${p.orden}</td><td class="num">${esc(p.id)}</td><td>${esc(p.localidad)} (${esc(p.provincia)})</td><td class="num">${p.ambito}</td></tr>`).join("")}</tbody>
+        </table></div>
+        <ul class="resumen">
+          <li>${esc(c.plazasEspecialidad)}</li>
+          <li>${esc(c.ambito)}</li>
+          <li><strong>Requisito:</strong> ${esc(c.requisito)}</li>
+          <li><strong>Solicitud:</strong> ${esc(c.solicitud)}</li>
+        </ul>
+      </section>
+      <section class="stack">
+        <h2>Fase de oposición</h2>
+        <div class="grid">${c.ejercicios.map((e) => `
+          <div class="panel-flat stack" style="gap:8px"><h3>${esc(e.nombre)}</h3><p>${esc(e.detalle)}</p><p class="muted">${esc(e.puntos)}</p></div>`).join("")}</div>
+        <p>${esc(c.final)}</p>
+      </section>
+      ${examCard()}
+      <p class="notice">Resumen elaborado a partir de las bases. Ante cualquier duda, prevalece el texto oficial publicado en la web del MITECO y en el BOE.</p>
+    `);
+    bindExamCard();
   }
 
   function renderSimulacro() {
@@ -287,8 +386,10 @@
       <section class="stack">
         <span class="eyebrow">Simulacro</span>
         <h1>Simulacro de examen</h1>
-        <p class="lead">Preguntas al azar de los temas que elijas, con tiempo límite y penalización por error, como en el ejercicio tipo test.</p>
+        <p class="lead">Reproduce el primer ejercicio oficial o configura un simulacro a tu medida.</p>
       </section>
+      ${examCard()}
+      <h2>Simulacro personalizado</h2>
       <form class="panel stack" id="simform">
         <div class="form-grid">
           <div class="field"><label for="sim-n">Número de preguntas</label>
@@ -303,14 +404,15 @@
             <span class="row"><button type="button" class="btn btn-sm btn-ghost" id="all">Todos</button><button type="button" class="btn btn-sm btn-ghost" id="none">Ninguno</button></span></div>
           ${T.bloques.map((b) => `
             <fieldset class="panel-flat stack" style="gap:6px;margin:0">
-              <legend class="eyebrow" style="padding:0 6px">Bloque ${b.id.slice(1)} · ${esc(b.nombre)}</legend>
+              <legend class="eyebrow" style="padding:0 6px">${b.oficial ? "Entra en el examen" : "No entra en el examen"} · ${esc(b.nombre)}</legend>
               ${T.temas.filter((t) => t.bloque === b.id).map((t) => `
-                <label class="check"><input type="checkbox" id="sim-${t.id}" value="${t.id}" checked> <span>${t.n}. ${esc(t.titulo)} <span class="muted num">(${questionsOf(t.id).length})</span></span></label>`).join("")}
+                <label class="check"><input type="checkbox" id="sim-${t.id}" value="${t.id}" ${b.oficial ? "checked" : ""}> <span>${t.label}. ${esc(t.titulo)} <span class="muted num">(${questionsOf(t.id).length})</span></span></label>`).join("")}
             </fieldset>`).join("")}
         </div>
         <div><button class="btn btn-primary" type="submit">Empezar simulacro</button></div>
       </form>
     `);
+    bindExamCard();
     const boxes = () => [...document.querySelectorAll('#simform input[type="checkbox"]')];
     document.getElementById("all").onclick = () => boxes().forEach((b) => (b.checked = true));
     document.getElementById("none").onclick = () => boxes().forEach((b) => (b.checked = false));
@@ -348,7 +450,8 @@
       </section>
 
       <section class="panel stack">
-        <span class="chip wrap">Tema ${tema.n} · ${esc(tema.titulo)}${it.q.propia ? " · pregunta propia" : ""}</span>
+        ${s.partes ? `<span class="eyebrow">${esc(s.partes[it.parte].nombre)}</span>` : ""}
+        <span class="chip wrap">${tema.label} · ${esc(tema.titulo)}${it.q.propia ? " · pregunta propia" : ""}</span>
         <p class="question">${esc(it.q.p)}</p>
         <ol class="options">
           ${it.order.map((orig, i) => {
@@ -378,7 +481,7 @@
           <h3>Hoja de respuestas</h3>
           <span class="muted num" style="font-size:.9rem">${answeredCount} respondidas · ${s.items.length - answeredCount} en blanco</span>
         </div>
-        <div class="qnav">${s.items.map((x, i) => `<button data-go="${i}" class="${x.answer !== null ? "answered" : ""} ${x.flagged ? "flagged" : ""} ${i === s.current ? "current" : ""}" aria-label="Pregunta ${i + 1}">${i + 1}</button>`).join("")}</div>
+        <div class="qnav">${s.items.map((x, i) => `${s.partes && (i === 0 || s.items[i - 1].parte !== x.parte) ? `<span class="eyebrow" style="flex-basis:100%">${esc(s.partes[x.parte].nombre)}</span>` : ""}<button data-go="${i}" class="${x.answer !== null ? "answered" : ""} ${x.flagged ? "flagged" : ""} ${i === s.current ? "current" : ""}" aria-label="Pregunta ${i + 1}">${i + 1}</button>`).join("")}</div>
         ${s.confirm ? `
           <div class="panel-flat stack" style="border-color:var(--ochre)">
             <strong>${s.items.length - answeredCount ? "Tienes " + (s.items.length - answeredCount) + " preguntas en blanco." : "Has respondido todas las preguntas."} ¿Entregar el examen?</strong>
@@ -425,7 +528,8 @@
   function renderResultado() {
     const s = session;
     const r = result(s);
-    const aprobado = r.nota >= 5;
+    const cfg = T.convocatoria.simulacro;
+    const aprobado = r.partes ? r.total >= cfg.minimo : r.nota >= 5;
     const fails = s.items.filter((it) => it.answer !== null && it.answer !== it.correct);
     const list = s.items.map((it, i) => ({ it, i })).filter(({ it }) =>
       reviewFilter === "todas" ? true : reviewFilter === "falladas" ? it.answer !== null && it.answer !== it.correct : it.answer === null);
@@ -434,13 +538,26 @@
       <section class="stack">
         <span class="eyebrow">Resultado · ${esc(s.titulo)}</span>
         <div class="row" style="align-items:flex-end;gap:18px">
-          <div class="score-big" style="color:var(--${aprobado ? "ok" : "ko"})">${fmt1(r.nota)}</div>
+          <div class="score-big" style="color:var(--${aprobado ? "ok" : "ko"})">${fmt1(r.partes ? r.total : r.nota)}</div>
           <div class="stack" style="gap:4px">
-            <span class="chip ${aprobado ? "ok" : "ko"}">${aprobado ? "Aprobado" : "Por debajo de 5"}</span>
-            <span class="muted" style="font-size:.9rem">Nota sobre 10 · ${fmtTime(s.secs)} empleados</span>
+            ${r.partes
+              ? `<span class="chip ${aprobado ? "ok" : "ko"}">${aprobado ? "Superarías el mínimo de " + cfg.minimo : "Por debajo de " + cfg.minimo + " puntos"}</span>
+                 <span class="muted" style="font-size:.9rem">Puntos sobre ${cfg.maxParte * 2} · ${fmtTime(s.secs)} empleados</span>`
+              : `<span class="chip ${aprobado ? "ok" : "ko"}">${aprobado ? "Aprobado" : "Por debajo de 5"}</span>
+                 <span class="muted" style="font-size:.9rem">Nota sobre 10 · ${fmtTime(s.secs)} empleados</span>`}
           </div>
         </div>
       </section>
+      ${r.partes ? `
+      <section class="grid">${r.partes.map((p) => `
+        <div class="panel-flat stack" style="gap:8px">
+          <span class="eyebrow">${esc(p.nombre)}</span>
+          <div class="row" style="justify-content:space-between;align-items:baseline"><strong class="num" style="font-size:1.5rem">${fmt1(p.pts)} <small class="muted">/ ${p.max}</small></strong>
+            <span class="muted num" style="font-size:.88rem">${p.ok} aciertos · ${p.ko} errores · ${p.blank} en blanco</span></div>
+          <div class="gauge ${gaugeClass(pct(p.pts, p.max))}"><span style="width:${pct(p.pts, p.max)}%"></span></div>
+        </div>`).join("")}
+      </section>
+      <p class="notice">Estimación lineal: cada parte vale 20 puntos y cada error resta 1/3 de acierto. En el examen real, el órgano de selección fija la puntuación directa mínima equivalente a los 20 puntos, así que el corte puede ser distinto.</p>` : ""}
       <section class="kpis">
         <div class="kpi"><div class="value" style="color:var(--ok)">${r.ok}</div><div class="label">Aciertos</div></div>
         <div class="kpi"><div class="value" style="color:var(--ko)">${r.ko}</div><div class="label">Errores</div></div>
@@ -462,7 +579,7 @@
         ${list.length ? list.map(({ it, i }) => {
           const okA = it.answer === it.correct;
           return `<article class="review-item">
-            <span class="eyebrow">Pregunta ${i + 1} · Tema ${temaById[it.q.tema].n}</span>
+            <span class="eyebrow">Pregunta ${i + 1} · ${temaById[it.q.tema].label}</span>
             <strong>${esc(it.q.p)}</strong>
             ${it.answer === null ? `<span class="ans muted">En blanco</span>` : `<span class="ans ${okA ? "ok" : "ko"}">Tu respuesta: ${esc(it.q.o[it.order[it.answer]])}</span>`}
             ${okA ? "" : `<span class="ans ok">Correcta: ${esc(it.q.o[0])}</span>`}
@@ -471,7 +588,7 @@
         }).join("") : `<p class="empty">No hay preguntas en este filtro.</p>`}
       </section>
     `);
-    const retry = (items, titulo) => startTest({ questions: items.map((it) => it.q), mode: s.mode, minutes: s.limitSecs ? Math.ceil(items.length * (s.limitSecs / 60 / s.items.length)) : 0, penalty: s.penalty, titulo, back: s.back });
+    const retry = (items, titulo) => s.oficial && items === s.items ? startOficial() : startTest({ questions: items.map((it) => it.q), mode: s.mode, minutes: s.limitSecs ? Math.ceil(items.length * (s.limitSecs / 60 / s.items.length)) : 0, penalty: s.penalty, titulo, back: s.back });
     const rf = document.getElementById("retry-fails"); if (rf) rf.onclick = () => retry(fails, s.titulo.replace(/ \(falladas\)$/, "") + " (falladas)");
     document.getElementById("retry-all").onclick = () => retry(s.items, s.titulo);
     $main.querySelectorAll("[data-f]").forEach((b) => (b.onclick = () => { reviewFilter = b.dataset.f; renderResultado(); }));
@@ -491,7 +608,7 @@
       ${fails.length ? Object.keys(byTema).sort().map((tid) => {
         const t = temaById[tid];
         return `<section class="stack">
-          <div class="row" style="justify-content:space-between"><h3>Tema ${t.n}. ${esc(t.titulo)}</h3>
+          <div class="row" style="justify-content:space-between"><h3>${t.label}. ${esc(t.titulo)}</h3>
             <button class="btn btn-sm" data-tema="${tid}">Practicar (${byTema[tid].length})</button></div>
           ${byTema[tid].map((q) => `<div class="panel-flat stack" style="gap:6px">
             <strong>${esc(q.p)}</strong>
@@ -503,7 +620,7 @@
       }).join("") : `<div class="panel empty">No tienes preguntas falladas pendientes. Haz un test para empezar a registrar tu progreso.</div>`}
     `);
     const p = document.getElementById("practice"); if (p) p.onclick = () => startTest({ questions: fails, mode: "estudio", titulo: "Repaso de fallos", back: "fallos" });
-    $main.querySelectorAll("[data-tema]").forEach((b) => (b.onclick = () => startTest({ questions: byTema[b.dataset.tema], mode: "estudio", titulo: "Repaso de fallos · Tema " + temaById[b.dataset.tema].n, back: "fallos" })));
+    $main.querySelectorAll("[data-tema]").forEach((b) => (b.onclick = () => startTest({ questions: byTema[b.dataset.tema], mode: "estudio", titulo: "Repaso de fallos · " + temaById[b.dataset.tema].label, back: "fallos" })));
   }
 
   let confirmReset = false;
@@ -527,7 +644,7 @@
         <div class="panel-flat table-wrap"><table>
           <thead><tr><th>Tema</th><th class="num">Preguntas</th><th class="num">Vistas</th><th class="num">Dominadas</th><th class="num">Acierto</th></tr></thead>
           <tbody>${T.temas.map((t) => { const s = temaStats(t.id); return `<tr>
-            <td><a href="#tema-${t.id}">${t.n}. ${esc(t.titulo)}</a></td>
+            <td><a href="#tema-${t.id}">${t.label}. ${esc(t.titulo)}</a></td>
             <td class="num">${s.total}</td><td class="num">${s.seen}</td><td class="num">${s.dominadas}</td>
             <td class="num">${s.seen ? `<span class="chip ${gaugeClass(s.acierto).replace("bad", "ko")}">${s.acierto}%</span>` : "—"}</td></tr>`; }).join("")}</tbody>
         </table></div>
@@ -641,7 +758,7 @@
       </section>
       <form class="panel stack" id="qform">
         <div class="field"><label for="q-tema">Tema</label>
-          <select id="q-tema">${T.temas.map((t) => `<option value="${t.id}">${t.n}. ${esc(t.titulo)}</option>`).join("")}</select></div>
+          <select id="q-tema">${T.temas.map((t) => `<option value="${t.id}">${t.label}. ${esc(t.titulo)}</option>`).join("")}</select></div>
         <div class="field"><label for="q-p">Enunciado</label><textarea id="q-p" required></textarea></div>
         <div class="field"><label for="q-ok" style="color:var(--ok)">Respuesta correcta</label><input type="text" id="q-ok" required></div>
         <div class="form-grid">
@@ -653,7 +770,7 @@
       <section class="stack">
         <h2>Guardadas (${mine.length})</h2>
         ${mine.length ? mine.map((q) => `<div class="panel-flat stack" style="gap:6px">
-          <span class="eyebrow">Tema ${temaById[q.tema] ? temaById[q.tema].n : "?"}</span>
+          <span class="eyebrow">Tema ${temaById[q.tema] ? temaById[q.tema].label : "?"}</span>
           <strong>${esc(q.p)}</strong>
           <span style="color:var(--ok)">${esc(q.o[0])}</span>
           <span class="muted" style="font-size:.92rem">${q.o.slice(1).map(esc).join(" · ")}</span>

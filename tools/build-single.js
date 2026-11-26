@@ -8,6 +8,8 @@ const read = (f) => fs.readFileSync(path.join(root, f), "utf8");
 let html = read("index.html");
 html = html.replace('<link rel="stylesheet" href="css/styles.css">', () => "<style>\n" + read("css/styles.css") + "\n</style>");
 html = html.replace('<script src="js/data.js"></script>', () => "<script>\n" + read("js/data.js") + "\n</script>");
+html = html.replace('<script src="js/data-quimica.js"></script>', () => "<script>\n" + read("js/data-quimica.js") + "\n</script>");
+html = html.replace('<script src="js/data-agua.js"></script>', () => "<script>\n" + read("js/data-agua.js") + "\n</script>");
 html = html.replace('<script src="js/app.js"></script>', () => "<script>\n" + read("js/app.js") + "\n</script>");
 fs.mkdirSync(path.join(root, "dist"), { recursive: true });
 fs.writeFileSync(path.join(root, "dist", "aula-chs.html"), html);

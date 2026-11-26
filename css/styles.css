@@ -275,3 +275,4 @@ footer {
   padding-block: 0 40px;
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+code { font-family: var(--font-mono); font-size: .85em; overflow-wrap: anywhere; }
