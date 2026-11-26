@@ -10,6 +10,7 @@ html = html.replace('<link rel="stylesheet" href="css/styles.css">', () => "<sty
 html = html.replace('<script src="js/data.js"></script>', () => "<script>\n" + read("js/data.js") + "\n</script>");
 html = html.replace('<script src="js/data-quimica.js"></script>', () => "<script>\n" + read("js/data-quimica.js") + "\n</script>");
 html = html.replace('<script src="js/data-agua.js"></script>', () => "<script>\n" + read("js/data-agua.js") + "\n</script>");
+html = html.replace('<script src="js/data-mis-temas.js"></script>', () => "<script>\n" + read("js/data-mis-temas.js") + "\n</script>");
 html = html.replace('<script src="js/app.js"></script>', () => "<script>\n" + read("js/app.js") + "\n</script>");
 fs.mkdirSync(path.join(root, "dist"), { recursive: true });
 fs.writeFileSync(path.join(root, "dist", "aula-chs.html"), html);

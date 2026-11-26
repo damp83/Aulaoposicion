@@ -18,7 +18,7 @@ Plataforma web para preparar la oposición de **M2 Química** de la **Confederac
 - **Tests por tema** en modo estudio (corrección inmediata con explicación) y modo examen (cronometrado, con hoja de respuestas).
 - **Simulacro personalizado**, **repaso de fallos**, **progreso** con historial y gráfica, **preguntas propias** y **copia de seguridad** en JSON.
 - La sección *Convocatoria* resume las plazas, los requisitos, la solicitud y los ejercicios.
-- **Importar temas propios** (sección *Importar*): pega o sube JSON con temas completos (título, ideas clave y preguntas). Al cargar un tema, sus preguntas de ejemplo dejan de usarse. Si recargas un tema, las preguntas con el mismo enunciado se actualizan y las nuevas se añaden. La página incluye las instrucciones de formato para copiarlas en otra conversación.
+- **Importar temas propios** (sección *Importar*): sube los PDF de tus temas, con el modelo de «Esquema-resumen», «Preguntas tipo test» y «Solucionario». Se toman las preguntas, la respuesta correcta y su justificación, y como ideas clave el esquema y las trampas frecuentes. También acepta JSON o texto pegado. Al cargar un tema, sus preguntas de ejemplo dejan de usarse. Si recargas un tema, las preguntas con el mismo enunciado se actualizan y las nuevas se añaden. La página incluye las instrucciones de formato para copiarlas en otra conversación.
 
 ## Uso
 
@@ -34,7 +34,15 @@ node tools/build-single.js
 
 El progreso se guarda en el `localStorage` del navegador; usa *Progreso → Copia de seguridad* para no perderlo.
 
-## Formato de importación
+## Temas propios incluidos en la plataforma
+
+`js/data-mis-temas.js` contiene los temas elaborados por la persona opositora que ya forman parte de la plataforma (de momento, el tema 3 de Química). Para añadir otro: impórtalo en la sección *Importar*, exporta la copia de seguridad y copia en ese archivo el tema correspondiente de `temas`.
+
+## Lectura de PDF
+
+Los PDF se leen en el navegador con pdf.js 3.11.174, que se descarga desde cdnjs solo al subir un PDF (hace falta conexión). El tema se detecta por la cabecera «Tema N · …» y la palabra «Química» o «parte común»; si no se detecta, se elige en un desplegable antes de cargar.
+
+## Formato de importación (JSON)
 
 ```json
 {

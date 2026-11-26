@@ -52,7 +52,7 @@
   T.temas.forEach((t) => { ORIG[t.id] = { titulo: t.titulo, resumen: t.resumen, preguntas: t.preguntas }; });
   function applyImports() {
     T.temas.forEach((t) => {
-      const o = ORIG[t.id], imp = state.temas[t.id];
+      const o = ORIG[t.id], imp = state.temas[t.id] || (T.misTemas || {})[t.id];
       t.titulo = o.titulo; t.resumen = o.resumen; t.preguntas = o.preguntas; t.mio = false;
       if (imp && imp.preguntas && imp.preguntas.length) {
         t.mio = true;
@@ -62,6 +62,7 @@
       }
     });
   }
+  const impOf = (id) => state.temas[id] || (T.misTemas || {})[id] || null;
   const hash = (str) => { let h = 5381; for (const ch of String(str).trim().toLowerCase()) h = ((h << 5) + h + ch.codePointAt(0)) | 0; return (h >>> 0).toString(36); };
   applyImports();
 
@@ -330,7 +331,7 @@
       </section>
 
       <section class="stack">
-        <h2>Ideas clave${t.mio && state.temas[t.id].resumen && state.temas[t.id].resumen.length ? "" : ' <span class="chip">de ejemplo</span>'}</h2>
+        <h2>Ideas clave${t.mio && (impOf(t.id).resumen || []).length ? "" : ' <span class="chip">de ejemplo</span>'}</h2>
         <ul class="resumen">${t.resumen.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>
       </section>
 
@@ -858,10 +859,14 @@
     return { q: [p, opts, e] };
   }
 
-  function parseImport(text) {
+  function parseImport(text, origen) {
     const values = extractJsonValues(text);
     const errores = [], avisos = [], temas = {};
-    if (!values.length) return { temas, errores: ["No se ha encontrado ningún bloque JSON en el texto."], avisos };
+    // Sin JSON: se intenta leer como texto de un tema con el modelo de PDF (preguntas a)–d) y solucionario)
+    if (!values.length || (values.every((v) => v && v.__error) && /solucionario/i.test(text))) {
+      if (/solucionario/i.test(text)) return parseTemaText(String(text).split(/\r?\n/), origen || "Texto pegado");
+      return { entries: [], errores: ["No se ha encontrado ningún bloque JSON ni un tema con preguntas y solucionario."], avisos };
+    }
     const temaObjs = [];
     const collect = (v) => {
       if (!v) return;
@@ -896,16 +901,161 @@
         else t.preguntas.push(r.q);
       });
     });
-    Object.keys(temas).forEach((id) => { if (!temas[id].preguntas.length) delete temas[id]; });
-    return { temas, errores, avisos };
+    const entries = Object.keys(temas).filter((id) => temas[id].preguntas.length).map((id) => ({ id, ...temas[id], origen: origen || "JSON" }));
+    return { entries, errores, avisos };
+  }
+
+  // ── Lectura de temas con el modelo de PDF: portada (número y título), «Esquema-resumen» con «Trampas
+  //    frecuentes», «Preguntas tipo test» numeradas con opciones a)–d) y «Solucionario» (n.º, letra, justificación).
+  function parseTemaText(rawLines, origen) {
+    const errores = [], avisos = [];
+    const lines = rawLines.map((l) => String(l).replace(/\s+/g, " ").trim()).filter(Boolean)
+      .filter((l) => !/^\d+\s*\/\s*\d+$/.test(l))              // n.º de página «3 / 14»
+      .filter((l) => !/(\.\s?){5,}\s*\d*$/.test(l));             // líneas del índice con puntos guía
+    const head = lines.slice(0, 60).join(" ");
+    // Número de tema: cabecera «Tema 3 · …» o número suelto en la portada
+    let num = null, tm = lines.join("\n").match(/\bTema\s+(\d{1,2})\s*[·\-–:]/);
+    if (tm) num = parseInt(tm[1], 10);
+    const coverIdx = lines.slice(0, 15).findIndex((l) => /^\d{1,2}$/.test(l));
+    if (num === null && coverIdx >= 0) num = parseInt(lines[coverIdx], 10);
+    let bloque = null;
+    if (/parte com[uú]n|temario com[uú]n|organizaci[oó]n y funcionamiento/i.test(head)) bloque = "c";
+    else if (/qu[ií]mica/i.test(head)) bloque = "q";
+    let id = num && bloque ? bloque + String(num).padStart(2, "0") : null;
+    if (id && !temaById[id]) id = null;
+    // Título: líneas de portada tras el número, hasta los datos de especialidad
+    let titulo = "";
+    if (coverIdx >= 0) {
+      const stop = /^(especialidad|grupo profesional|parte com|temario com|confederaci|contenido|datos revisados|personal laboral|índice)/i;
+      const tl = [];
+      for (let i = coverIdx + 1; i < Math.min(lines.length, coverIdx + 8) && !stop.test(lines[i]); i++) tl.push(lines[i]);
+      titulo = tl.join(" ").trim();
+    }
+    const lastIdx = (re, from = 0) => { let r = -1; lines.forEach((l, i) => { if (i >= from && re.test(l)) r = i; }); return r; };
+    const iQ = lastIdx(/^(\d+\.\s*)?Preguntas tipo test/i);
+    const iS = lastIdx(/^Solucionario\b/i);
+    const iE = lastIdx(/^(\d+\.\s*)?Esquema/i);
+    let iB = lines.findIndex((l, i) => i > iS && /^(Bibliograf|Fuentes|Anexo)/i.test(l));
+    if (iB < 0) iB = lines.length;
+    if (iQ < 0 || iS < 0 || iS < iQ) return { entries: [], errores: [origen + ": no encuentro las secciones «Preguntas tipo test» y «Solucionario»."], avisos };
+
+    // Ideas clave: esquema-resumen numerado y trampas frecuentes
+    const resumen = [];
+    if (iE >= 0 && iE < iQ) {
+      let trampas = false;
+      for (let i = iE + 1; i < iQ; i++) {
+        const l = lines[i];
+        if (/^trampas/i.test(l)) { trampas = true; continue; }
+        if (/^\d{1,2}$/.test(l)) continue; // superíndices sueltos
+        const m = l.match(/^\d{1,2}\.\s+(.+)/), b = l.match(/^[•·▪\-–]\s*(.+)/);
+        if (m || b) resumen.push((trampas ? "Trampa frecuente: " : "") + (m ? m[1] : b[1]));
+        else if (resumen.length) resumen[resumen.length - 1] += " " + l;
+      }
+    }
+
+    // Preguntas
+    const qs = []; let cur = null, opt = null;
+    for (let i = iQ + 1; i < iS; i++) {
+      const l = lines[i];
+      const mq = l.match(/^(\d{1,2})[\.\)]\s+(.+)/);
+      if (mq && parseInt(mq[1], 10) === qs.length + 1) { cur = { n: qs.length + 1, p: mq[2], o: [] }; qs.push(cur); opt = null; continue; }
+      const mo = l.match(/^([a-fA-F])[\)\.]\s*(.*)/);
+      if (cur && mo && mo[1].toLowerCase().charCodeAt(0) - 97 === cur.o.length) { cur.o.push(mo[2]); opt = cur.o.length - 1; continue; }
+      if (!cur) continue;
+      if (opt === null) cur.p += " " + l; else cur.o[opt] += " " + l;
+    }
+    // Solucionario
+    const sol = {}; let last = null;
+    for (let i = iS + 1; i < iB; i++) {
+      const l = lines[i];
+      if (/^n\.?\s*º|^resp|^justific/i.test(l)) continue;
+      const ms = l.match(/^(\d{1,2})\s*[\.\)]?\s+([a-fA-F])[\)\.]?(?:\s+(.*))?$/);
+      if (ms) { last = parseInt(ms[1], 10); sol[last] = { r: ms[2].toLowerCase(), e: (ms[3] || "").trim() }; }
+      else if (last !== null) sol[last].e = (sol[last].e + " " + l).trim();
+    }
+    const preguntas = [];
+    qs.forEach((q) => {
+      const s = sol[q.n];
+      if (!s) { errores.push(origen + ", pregunta " + q.n + ": no aparece en el solucionario."); return; }
+      const idx = s.r.charCodeAt(0) - 97;
+      const r = normQuestion({ p: q.p, o: q.o, correcta: s.r.toUpperCase(), e: s.e }, 1);
+      if (r.error || idx >= q.o.length) { errores.push(origen + ", pregunta " + q.n + ": " + (r.error || "la letra del solucionario no corresponde a ninguna opción")); return; }
+      preguntas.push(r.q);
+    });
+    if (!qs.length) errores.push(origen + ": no se han reconocido preguntas numeradas con opciones a), b), c), d).");
+    if (!id) avisos.push(origen + ": elige a qué tema corresponde en el desplegable.");
+    if (!resumen.length && preguntas.length) avisos.push(origen + ": no se ha encontrado el esquema-resumen; las ideas clave del tema no cambian.");
+    return { entries: preguntas.length ? [{ id, titulo, resumen, preguntas, origen }] : [], errores, avisos };
+  }
+
+  // pdf.js se carga bajo demanda desde cdnjs; el script del worker se carga también como <script>
+  // para que pdf.js trabaje en el hilo principal (el visor no permite workers de otro origen).
+  const PDFJS = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/";
+  let pdfjsReady = null;
+  function loadScript(src) {
+    return new Promise((res, rej) => { const s = document.createElement("script"); s.src = src; s.onload = res; s.onerror = () => rej(new Error("No se pudo cargar " + src)); document.head.appendChild(s); });
+  }
+  function loadPdfJs() {
+    if (!pdfjsReady) pdfjsReady = loadScript(PDFJS + "pdf.worker.min.js").then(() => loadScript(PDFJS + "pdf.min.js")).then(() => {
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS + "pdf.worker.min.js";
+      return window.pdfjsLib;
+    }).catch((e) => { pdfjsReady = null; throw e; });
+    return pdfjsReady;
+  }
+  async function pdfToLines(buffer) {
+    const pdfjs = await loadPdfJs();
+    const doc = await pdfjs.getDocument({ data: new Uint8Array(buffer), isEvalSupported: false }).promise;
+    const pages = [];
+    for (let p = 1; p <= doc.numPages; p++) {
+      const page = await doc.getPage(p);
+      const tc = await page.getTextContent();
+      const items = tc.items.filter((it) => typeof it.str === "string" && it.str.trim() !== "")
+        .map((it) => ({ s: it.str, x: it.transform[4], y: it.transform[5], h: Math.abs(it.transform[3]) || it.height || 10, w: it.width || 0 }))
+        .sort((a, b) => b.y - a.y || a.x - b.x);
+      const lines = [];
+      items.forEach((it) => {
+        const ln = lines.find((l) => Math.abs(l.y - it.y) <= Math.max(2.5, Math.min(l.h, it.h) * 0.45));
+        if (ln) { ln.items.push(it); ln.h = Math.max(ln.h, it.h); } else lines.push({ y: it.y, h: it.h, items: [it] });
+      });
+      lines.sort((a, b) => b.y - a.y);
+      // Superíndices y subíndices: líneas formadas solo por fragmentos más pequeños que la línea vecina
+      // se integran en la línea normal más cercana (arriba o abajo) si están a menos de ~0,7 veces su altura.
+      const mainH = (l) => Math.max(...l.items.map((it) => it.h));
+      for (let i = 0; i < lines.length; i++) {
+        const l = lines[i], h = mainH(l);
+        const cands = [lines[i - 1], lines[i + 1]].filter(Boolean).filter((n) => mainH(n) * 0.85 > h && Math.abs(n.y - l.y) <= mainH(n) * 0.7);
+        if (!cands.length) continue;
+        const target = cands.sort((a, b) => Math.abs(a.y - l.y) - Math.abs(b.y - l.y))[0];
+        target.items.push(...l.items.map((it) => ({ ...it, small: true })));
+        lines.splice(i, 1); i--;
+      }
+      pages.push(lines.map((l) => {
+        l.items.sort((a, b) => a.x - b.x);
+        let out = "", end = null;
+        l.items.forEach((it) => {
+          if (end !== null && !it.small && it.x - end > l.h * 0.15 && !/\s$/.test(out) && !/^\s/.test(it.s)) out += " ";
+          out += it.s; end = it.x + it.w;
+        });
+        return out;
+      }));
+    }
+    // Cabeceras y pies repetidos en la mayoría de páginas se descartan (salvo para detectar el n.º de tema)
+    const count = {};
+    pages.forEach((ls) => new Set(ls).forEach((l) => (count[l] = (count[l] || 0) + 1)));
+    const rep = (l) => pages.length >= 4 && count[l] >= Math.ceil(pages.length / 2) && l.length < 120;
+    const header = Object.keys(count).filter(rep).join(" · ");
+    const all = [];
+    pages.forEach((ls) => ls.forEach((l) => { if (!rep(l)) all.push(l); }));
+    if (header) all.unshift(header);
+    return all;
   }
 
   // Fusiona con lo ya cargado: una pregunta con el mismo enunciado se actualiza; las nuevas se añaden.
-  function mergeImport(parsed) {
+  function mergeImport(byId) {
     const resumen = [];
-    Object.keys(parsed.temas).forEach((id) => {
-      const nuevo = parsed.temas[id];
-      const prev = state.temas[id] || { titulo: "", resumen: [], preguntas: [] };
+    Object.keys(byId).forEach((id) => {
+      const nuevo = byId[id];
+      const prev = state.temas[id] || (T.misTemas || {})[id] || { titulo: "", resumen: [], preguntas: [] };
       const byHash = new Map(prev.preguntas.map((q, i) => [hash(q[0]), i]));
       const preguntas = prev.preguntas.slice();
       let add = 0, upd = 0;
@@ -963,15 +1113,16 @@ Códigos de tema: c01 a c15 para el temario común del grupo M2 (Anexo VI) y q01
 
       <section class="panel stack">
         <h2>Pegar o subir temas</h2>
-        <div class="field"><label for="imp-temas">JSON de uno o varios temas</label>
+        <p>Sube los PDF de tus temas (con el modelo de «Preguntas tipo test» y «Solucionario») o pega el JSON o el texto de uno o varios temas.</p>
+        <div class="field"><label for="imp-temas">Texto o JSON</label>
           <textarea id="imp-temas" class="num" style="min-height:180px;font-size:.82rem" placeholder='{"tema":"q21","titulo":"…","resumen":["…"],"preguntas":[{"p":"…","correcta":"…","incorrectas":["…","…","…"],"e":"…"}]}'></textarea></div>
         <div class="row">
           <button class="btn btn-primary" id="imp-check">Comprobar</button>
-          <label class="btn" for="imp-temas-file" style="font-weight:600">Subir archivos .json o .txt</label>
-          <input type="file" id="imp-temas-file" accept=".json,.txt,application/json,text/plain" multiple hidden>
+          <label class="btn" for="imp-temas-file" style="font-weight:600">Subir PDF, .json o .txt</label>
+          <input type="file" id="imp-temas-file" accept=".pdf,.json,.txt,application/pdf,application/json,text/plain" multiple hidden>
           <button class="btn btn-ghost" id="imp-clear">Vaciar</button>
         </div>
-        <p class="muted" style="font-size:.9rem">Puedes pegar varios bloques seguidos, tal como te los da la otra conversación (con o sin <code>\`\`\`json</code>). Si vuelves a cargar un tema, las preguntas con el mismo enunciado se actualizan y las nuevas se añaden.</p>
+        <p class="muted" style="font-size:.9rem">De cada PDF se toman las preguntas, la respuesta correcta y la justificación del solucionario, y como ideas clave el esquema-resumen y las trampas frecuentes. Puedes subir varios PDF a la vez. Si vuelves a cargar un tema, las preguntas con el mismo enunciado se actualizan y las nuevas se añaden.</p>
         <div id="imp-preview"></div>
       </section>
 
@@ -981,8 +1132,8 @@ Códigos de tema: c01 a c15 para el temario común del grupo M2 (Anexo VI) y q01
           <thead><tr><th>Tema</th><th class="num">Preguntas</th><th class="num">Ideas clave</th><th></th></tr></thead>
           <tbody>${cargados.map((t) => `<tr>
             <td><a href="#tema-${t.id}">${t.label}. ${esc(t.titulo)}</a></td>
-            <td class="num">${t.preguntas.length}</td><td class="num">${(state.temas[t.id].resumen || []).length || "—"}</td>
-            <td class="num">${importPreview && importPreview.quitar === t.id
+            <td class="num">${t.preguntas.length}</td><td class="num">${(impOf(t.id).resumen || []).length || "—"}</td>
+            <td class="num">${!state.temas[t.id] ? '<span class="chip">Incluido en la plataforma</span>' : importPreview && importPreview.quitar === t.id
               ? `<button class="btn btn-sm btn-danger" data-quitar-ok="${t.id}">Confirmar</button> <button class="btn btn-sm" data-quitar-no>Cancelar</button>`
               : `<button class="btn btn-sm btn-ghost" data-quitar="${t.id}">Quitar</button>`}</td></tr>`).join("")}</tbody>
         </table></div>
@@ -991,8 +1142,8 @@ Códigos de tema: c01 a c15 para el temario común del grupo M2 (Anexo VI) y q01
       </section>
 
       <section class="stack">
-        <h2>Formato para la otra conversación</h2>
-        <p class="muted">Copia este texto y pégalo en la conversación donde elaboras los temas, para que te los entregue listos para importar.</p>
+        <h2>Alternativa: formato JSON</h2>
+        <p class="muted">Los PDF con tu modelo de tema se importan directamente. Si alguna vez prefieres pasar solo preguntas sueltas, copia este texto en la conversación donde elaboras los temas para que te las entregue en JSON.</p>
         <pre class="panel-flat num" style="white-space:pre-wrap;font-size:.8rem;margin:0" id="prompt-formato">${esc(PROMPT_FORMATO)}</pre>
         <div><button class="btn btn-sm" id="copy-prompt">Copiar instrucciones</button></div>
         <details class="panel-flat"><summary style="cursor:pointer;font-weight:600">Lista de códigos de tema</summary>
@@ -1033,35 +1184,60 @@ Códigos de tema: c01 a c15 para el temario común del grupo M2 (Anexo VI) y q01
 
     const ta = document.getElementById("imp-temas");
     const box = document.getElementById("imp-preview");
-    const showPreview = () => {
-      const parsed = parseImport(ta.value);
-      const ids = Object.keys(parsed.temas);
-      const nq = ids.reduce((a, id) => a + parsed.temas[id].preguntas.length, 0);
+    let pending = null;
+    const opcionesTema = (sel) => `<option value="">— Elige el tema —</option>${T.bloques.map((b) => `<optgroup label="${esc(b.nombre)}">${T.temas.filter((t) => t.bloque === b.id).map((t) => `<option value="${t.id}" ${t.id === sel ? "selected" : ""}>${t.label}. ${esc(ORIG[t.id].titulo).slice(0, 70)}</option>`).join("")}</optgroup>`).join("")}`;
+    const renderPending = () => {
+      const parsed = pending;
+      const nq = parsed.entries.reduce((a, e) => a + e.preguntas.length, 0);
       box.innerHTML = `<div class="stack" style="gap:10px">
-        ${ids.map((id) => { const t = parsed.temas[id], q = t.preguntas[0]; return `<div class="panel-flat stack" style="gap:6px">
-          <div class="row" style="justify-content:space-between"><strong>${temaById[id].label}${t.titulo ? ". " + esc(t.titulo) : ""}</strong><span class="chip accent num">${t.preguntas.length} preguntas</span></div>
-          ${temaById[id].mio ? '<span class="chip accent">Ya cargado: se fusiona con tus preguntas</span>' : '<span class="chip mid">Sustituye a las preguntas de ejemplo</span>'}
+        ${parsed.entries.map((e, i) => { const q = e.preguntas[0]; return `<div class="panel-flat stack" style="gap:8px">
+          <div class="row" style="justify-content:space-between"><span class="eyebrow">${esc(e.origen)}</span><span class="chip accent num">${e.preguntas.length} preguntas · ${e.resumen.length} ideas clave</span></div>
+          ${e.titulo ? `<strong>${esc(e.titulo)}</strong>` : ""}
+          <div class="field"><label for="imp-sel-${i}">Cargar en el tema</label><select id="imp-sel-${i}" data-entry="${i}">${opcionesTema(e.id)}</select></div>
           <span class="muted" style="font-size:.9rem">Muestra: ${esc(q[0])}</span>
           <span style="color:var(--ok);font-size:.9rem">✓ ${esc(q[1][0])}</span>
+          ${q[2] ? `<span class="muted" style="font-size:.85rem">Explicación: ${esc(q[2])}</span>` : ""}
         </div>`; }).join("")}
         ${parsed.avisos.map((a) => `<p class="explain">${esc(a)}</p>`).join("")}
         ${parsed.errores.length ? `<div class="panel-flat stack" style="gap:4px;border-color:var(--ko)"><strong style="color:var(--ko)">${parsed.errores.length} ${parsed.errores.length === 1 ? "problema" : "problemas"} (esas preguntas no se cargarán)</strong>
           ${parsed.errores.slice(0, 30).map((e) => `<span style="font-size:.9rem">· ${esc(e)}</span>`).join("")}${parsed.errores.length > 30 ? `<span class="muted">… y ${parsed.errores.length - 30} más</span>` : ""}</div>` : ""}
-        ${nq ? `<div><button class="btn btn-primary" id="imp-load">Cargar ${nq} preguntas en ${ids.length} ${ids.length === 1 ? "tema" : "temas"}</button></div>` : ""}
+        ${nq ? `<div><button class="btn btn-primary" id="imp-load">Cargar ${nq} preguntas</button></div>` : ""}
       </div>`;
+      box.querySelectorAll("[data-entry]").forEach((sel) => (sel.onchange = () => { pending.entries[sel.dataset.entry].id = sel.value || null; }));
       const btn = document.getElementById("imp-load");
       if (btn) btn.onclick = () => {
-        const r = mergeImport(parsed);
+        if (pending.entries.some((e) => !e.id)) { toast("Elige el tema de destino de cada bloque"); return; }
+        const byId = {};
+        pending.entries.forEach((e) => {
+          const t = byId[e.id] || (byId[e.id] = { titulo: "", resumen: [], preguntas: [] });
+          if (e.titulo) t.titulo = e.titulo;
+          if (e.resumen.length) t.resumen = e.resumen;
+          t.preguntas = t.preguntas.concat(e.preguntas);
+        });
+        const r = mergeImport(byId);
         const add = r.reduce((a, x) => a + x.add, 0), upd = r.reduce((a, x) => a + x.upd, 0);
         toast(add + " preguntas nuevas" + (upd ? " y " + upd + " actualizadas" : "") + " en " + r.length + (r.length === 1 ? " tema" : " temas"));
         importPreview = null; renderImportar();
       };
     };
+    const showPreview = () => { pending = parseImport(ta.value, "Texto pegado"); renderPending(); };
     document.getElementById("imp-check").onclick = showPreview;
-    document.getElementById("imp-clear").onclick = () => { ta.value = ""; box.innerHTML = ""; };
-    document.getElementById("imp-temas-file").onchange = (ev) => {
-      const files = [...ev.target.files]; if (!files.length) return;
-      Promise.all(files.map((f) => f.text())).then((txts) => { ta.value = txts.join("\n\n"); showPreview(); });
+    document.getElementById("imp-clear").onclick = () => { ta.value = ""; box.innerHTML = ""; pending = null; };
+    document.getElementById("imp-temas-file").onchange = async (ev) => {
+      const files = [...ev.target.files]; ev.target.value = ""; if (!files.length) return;
+      box.innerHTML = `<p class="muted">Leyendo ${files.length} ${files.length === 1 ? "archivo" : "archivos"}…</p>`;
+      const acc = { entries: [], errores: [], avisos: [] };
+      for (const f of files) {
+        try {
+          let r;
+          if (/\.pdf$/i.test(f.name) || f.type === "application/pdf") r = parseTemaText(await pdfToLines(await f.arrayBuffer()), f.name);
+          else r = parseImport(await f.text(), f.name);
+          acc.entries.push(...r.entries); acc.errores.push(...r.errores); acc.avisos.push(...r.avisos);
+        } catch (e) {
+          acc.errores.push(f.name + ": no se ha podido leer (" + (e && e.message ? e.message : "error desconocido") + "). Para leer PDF hace falta conexión a internet.");
+        }
+      }
+      pending = acc; renderPending();
     };
     document.getElementById("copy-prompt").onclick = () => {
       navigator.clipboard.writeText(PROMPT_FORMATO).then(() => toast("Instrucciones copiadas"), () => {
