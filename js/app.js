@@ -296,6 +296,17 @@
     `);
   }
 
+  // Idea clave: «Concepto — Columna: valor · Columna: valor» (fila de tabla) o «Concepto: texto»
+  function ideaHtml(r) {
+    const fila = r.match(/^([^—]{1,60}) — (.+)$/);
+    if (fila) {
+      const partes = fila[2].split(" · ").map((p) => { const m = p.match(/^([^:]{1,40}): (.+)$/); return m ? `<li><span class="muted">${esc(m[1])}:</span> ${esc(m[2])}</li>` : `<li>${esc(p)}</li>`; });
+      return `<li><strong>${esc(fila[1])}</strong><ul class="subideas">${partes.join("")}</ul></li>`;
+    }
+    const m = r.match(/^([^:]{2,45}): (.+)$/);
+    return m && !/[.;]/.test(m[1]) ? `<li><strong>${esc(m[1])}:</strong> ${esc(m[2])}</li>` : `<li>${esc(r)}</li>`;
+  }
+
   function renderTema(id) {
     const t = temaById[id];
     const qs = questionsOf(id);
@@ -332,7 +343,9 @@
 
       <section class="stack">
         <h2>Ideas clave${t.mio && (impOf(t.id).resumen || []).length ? "" : ' <span class="chip">de ejemplo</span>'}</h2>
-        <ul class="resumen">${t.resumen.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>
+        <ul class="resumen">${t.resumen.filter((r) => !/^Trampa frecuente: /.test(r)).map(ideaHtml).join("")}</ul>
+        ${t.resumen.some((r) => /^Trampa frecuente: /.test(r)) ? `<h3 style="margin-top:8px">Trampas frecuentes</h3>
+        <ul class="resumen trampas">${t.resumen.filter((r) => /^Trampa frecuente: /.test(r)).map((r) => `<li>${esc(r.replace(/^Trampa frecuente: /, ""))}</li>`).join("")}</ul>` : ""}
       </section>
 
       <nav class="row" style="justify-content:space-between">
@@ -907,19 +920,83 @@
 
   // ── Lectura de temas con el modelo de PDF: portada (número y título), «Esquema-resumen» con «Trampas
   //    frecuentes», «Preguntas tipo test» numeradas con opciones a)–d) y «Solucionario» (n.º, letra, justificación).
+  // Marcas internas de la lectura de PDF: ␟ línea sangrada; ␞<x>␝ inicio de celda en la posición x
+  const SEP_CELDA = "\u241E", SEP_SANGRIA = "\u241F", FIN_X = "\u241D", FIN_X_SP = "\u241C";
+  const plainLine = (l) => String(l).replace(/^\u241F/, "").replace(/\u241E[\d,]*\u241C/g, " ").replace(/\u241E[\d,]*\u241D/g, "").replace(/\s+/g, " ").trim();
+  // Fragmentos de una línea con su posición: [{ x, end, sp, t }]
+  const itemsOf = (raw) => String(raw).replace(/^\u241F/, "").split(SEP_CELDA).slice(1).map((c) => {
+    const m = c.match(/^(\d+),(\d+)([\u241C\u241D])([\s\S]*)$/);
+    return m ? { x: +m[1], end: +m[2], sp: m[3] === FIN_X_SP, t: m[4] } : null;
+  }).filter((it) => it && it.t.trim());
+  const joinItems = (its) => its.map((it, i) => (i && it.sp ? " " : "") + it.t).join("").replace(/\s+/g, " ").trim();
+  // Celdas: fragmentos separados por un hueco de más de 10 puntos
+  const cellsOf = (raw) => {
+    const cells = [];
+    itemsOf(raw).forEach((it) => {
+      const last = cells[cells.length - 1];
+      if (last && it.x - last.end <= 10) { last.items.push(it); last.end = it.end; }
+      else cells.push({ x: it.x, end: it.end, items: [it] });
+    });
+    return cells.map((c) => ({ x: c.x, end: c.end, t: joinItems(c.items) })).filter((c) => c.t);
+  };
+
+  // Reconstruye una tabla a partir de su fila de cabecera: asigna cada celda a la columna más cercana,
+  // une las líneas de continuación y devuelve una idea clave por fila. Devuelve también dónde termina.
+  function parseTabla(marcadas, lines, start, stop) {
+    let head = cellsOf(marcadas[start]);
+    let i = start + 1;
+    // Cabecera en dos líneas: la primera no tiene celda en la primera columna y la segunda sí
+    const sig = start + 1 < stop ? cellsOf(marcadas[start + 1]) : [];
+    if (sig.length > head.length && head[0].x > sig[0].x + 20 && sig.every((c) => c.t.length <= 32)) {
+      const arriba = head;
+      head = sig.map((c) => ({ ...c }));
+      const colH = (x) => { let k = 0; head.forEach((h, j) => { if (h.x <= x + 25) k = j; }); return k; };
+      arriba.forEach((c) => { const k = colH(c.x); head[k].t = c.t + " " + head[k].t; });
+      i = start + 2;
+    }
+    const cols = head.map((c) => c.x);
+    const colOf = (x) => { let k = 0; cols.forEach((cx, j) => { if (cx <= x + 6) k = j; }); return k; };
+    const filas = [];
+    for (; i < stop; i++) {
+      const l = lines[i];
+      if (/^trampas/i.test(l) || /^\d{1,2}\.\s/.test(l) || /^[•·▪]/.test(l)) break;
+      const its = itemsOf(marcadas[i]);
+      if (!its.length) break;
+      // Párrafo posterior a la tabla: un fragmento que empieza en la primera columna y se extiende hasta la segunda
+      // (una palabra larga puede invadir la columna vecina, pero no un texto que nace en la primera)
+      if (its.some((it) => colOf(it.x) === 0 && it.end > cols[1] + 8 && it.t.trim().length > 20)) break;
+      const porCol = cols.map(() => []);
+      its.forEach((it) => porCol[colOf(it.x)].push(it));
+      const primera = joinItems(porCol[0]);
+      const nueva = primera && !/^[a-záéíóúüñ(]/.test(primera);
+      if (nueva || !filas.length) filas.push(cols.map(() => ""));
+      const fila = filas[filas.length - 1];
+      porCol.forEach((g, k) => { const t = joinItems(g); if (t) fila[k] = (fila[k] ? fila[k] + " " : "") + t; });
+    }
+    const items = filas.filter((f) => f[0]).map((f) => cols.length === 2
+      ? f[0] + ": " + f[1]
+      : f[0] + " — " + f.slice(1).map((v, k) => (v ? head[k + 1].t + ": " + v : "")).filter(Boolean).join(" · "));
+    return { items, end: i };
+  }
+
   function parseTemaText(rawLines, origen) {
     const errores = [], avisos = [];
-    const lines = rawLines.map((l) => String(l).replace(/\s+/g, " ").trim()).filter(Boolean)
-      .filter((l) => !/^\d+\s*\/\s*\d+$/.test(l))              // n.º de página «3 / 14»
-      .filter((l) => !/(\.\s?){5,}\s*\d*$/.test(l));             // líneas del índice con puntos guía
+    const pares = rawLines.map((l) => [String(l).replace(/[ \t\u00a0]+/g, " ").trim(), plainLine(l)])
+      .filter(([, l]) => l)
+      .filter(([, l]) => !/^\d+\s*\/\s*\d+$/.test(l))           // n.º de página «3 / 14»
+      .filter(([, l]) => !/(\.\s?){5,}\s*\d*$/.test(l));          // líneas del índice con puntos guía
+    const lines = pares.map(([, l]) => l), marcadas = pares.map(([r]) => r);
     const head = lines.slice(0, 60).join(" ");
     // Número de tema: cabecera «Tema 3 · …» o número suelto en la portada
     let num = null, tm = lines.join("\n").match(/\bTema\s+(\d{1,2})\s*[·\-–:]/);
     if (tm) num = parseInt(tm[1], 10);
     const coverIdx = lines.slice(0, 15).findIndex((l) => /^\d{1,2}$/.test(l));
     if (num === null && coverIdx >= 0) num = parseInt(lines[coverIdx], 10);
+    // Bloque: la cabecera y la portada mandan («Química (M2)», «Especialidad de Química», «parte específica»);
+    // la ficha del tema puede citar el «temario común» sin que el tema lo sea.
     let bloque = null;
-    if (/parte com[uú]n|temario com[uú]n|organizaci[oó]n y funcionamiento/i.test(head)) bloque = "c";
+    if (/qu[ií]mica\s*\(M2\)|especialidad de qu[ií]mica|parte espec[ií]fica/i.test(head)) bloque = "q";
+    else if (/parte com[uú]n|temario com[uú]n|organizaci[oó]n y funcionamiento/i.test(head)) bloque = "c";
     else if (/qu[ií]mica/i.test(head)) bloque = "q";
     let id = num && bloque ? bloque + String(num).padStart(2, "0") : null;
     if (id && !temaById[id]) id = null;
@@ -942,13 +1019,27 @@
     // Ideas clave: esquema-resumen numerado y trampas frecuentes
     const resumen = [];
     if (iE >= 0 && iE < iQ) {
-      let trampas = false;
+      let trampas = false, trasTabla = false;
       for (let i = iE + 1; i < iQ; i++) {
-        const l = lines[i];
+        const l = lines[i], raw = marcadas[i];
         if (/^trampas/i.test(l)) { trampas = true; continue; }
+        // Tabla: fila de cabecera con 2 o más celdas cortas seguida de otra fila con varias celdas
+        const hc = cellsOf(raw);
+        if (!trampas && hc.length >= 2 && hc.every((c) => c.t.length <= 32) && i + 1 < iQ && cellsOf(marcadas[i + 1]).length >= 2) {
+          const tb = parseTabla(marcadas, lines, i, iQ);
+          if (tb.items.length) { resumen.push(...tb.items); i = tb.end - 1; trasTabla = true; continue; }
+        }
         if (/^\d{1,2}$/.test(l)) continue; // superíndices sueltos
-        const m = l.match(/^\d{1,2}\.\s+(.+)/), b = l.match(/^[•·▪\-–]\s*(.+)/);
-        if (m || b) resumen.push((trampas ? "Trampa frecuente: " : "") + (m ? m[1] : b[1]));
+        const m = l.match(/^\d{1,2}\.\s+(.+)/), b = l.match(/^(?:[•·▪]\s*|[\-–]\s+)(.+)/);
+        const celdas = raw.startsWith(SEP_SANGRIA) ? null : cellsOf(raw).map((c) => c.t);
+        if (m || b) { trasTabla = false; resumen.push((trampas ? "Trampa frecuente: " : "") + (m ? m[1] : b[1])); }
+        // Texto corrido tras una tabla: cada frase que empieza en línea nueva es una idea
+        else if (trasTabla && (trasTabla === true || /\.\s*$/.test(resumen[resumen.length - 1])) && /^[A-ZÁÉÍÓÚÑ]/.test(l)) { trasTabla = "parrafo"; resumen.push(l); }
+        else if (celdas && celdas.length >= 2) {
+          // Fila de tabla «Concepto | Idea clave»: se omite la cabecera
+          if ((/^(concepto|t[eé]rmino|aspecto|idea|par[aá]metro|magnitud|bloque|apartado)$/i.test(celdas[0]) || celdas.some((c) => /^ideas? clave$/i.test(c))) && celdas.join(" ").length < 60) continue;
+          resumen.push(celdas[0] + ": " + celdas.slice(1).join(" · "));
+        }
         else if (resumen.length) resumen[resumen.length - 1] += " " + l;
       }
     }
@@ -969,7 +1060,7 @@
     for (let i = iS + 1; i < iB; i++) {
       const l = lines[i];
       if (/^n\.?\s*º|^resp|^justific/i.test(l)) continue;
-      const ms = l.match(/^(\d{1,2})\s*[\.\)]?\s+([a-fA-F])[\)\.]?(?:\s+(.*))?$/);
+      const ms = l.match(/^(\d{1,2})\s*[\.\)]?\s+([a-fA-F])(?![a-zA-ZáéíóúüñÁÉÍÓÚÜÑ])[\)\.]?\s*(.*)$/);
       if (ms) { last = parseInt(ms[1], 10); sol[last] = { r: ms[2].toLowerCase(), e: (ms[3] || "").trim() }; }
       else if (last !== null) sol[last].e = (sol[last].e + " " + l).trim();
     }
@@ -1029,14 +1120,19 @@
         target.items.push(...l.items.map((it) => ({ ...it, small: true })));
         lines.splice(i, 1); i--;
       }
+      // Marcas de maquetación: ␞ separa celdas (hueco grande en la misma línea) y ␟ indica línea sangrada
+      // respecto al margen izquierdo de la página (continuación de una celda o de una opción).
+      lines.forEach((l) => l.items.sort((a, b) => a.x - b.x));
+      const minX = Math.min(...lines.map((l) => l.items[0].x));
       pages.push(lines.map((l) => {
-        l.items.sort((a, b) => a.x - b.x);
         let out = "", end = null;
         l.items.forEach((it) => {
-          if (end !== null && !it.small && it.x - end > l.h * 0.15 && !/\s$/.test(out) && !/^\s/.test(it.s)) out += " ";
-          out += it.s; end = it.x + it.w;
+          const gap = end === null ? 0 : it.x - end;
+          const espacio = end !== null && gap > l.h * (it.small ? 0.2 : 0.15) && !/\s$/.test(out) && !/^\s/.test(it.s);
+          out += SEP_CELDA + Math.round(it.x) + "," + Math.round(it.x + it.w) + (espacio ? FIN_X_SP : FIN_X) + it.s;
+          end = it.x + it.w;
         });
-        return out;
+        return (l.items[0].x - minX > 30 ? SEP_SANGRIA : "") + out;
       }));
     }
     // Cabeceras y pies repetidos en la mayoría de páginas se descartan (salvo para detectar el n.º de tema)
@@ -1049,6 +1145,9 @@
     if (header) all.unshift(header);
     return all;
   }
+
+  // Acceso para comprobar la lectura de PDF desde la consola o desde pruebas automáticas
+  window.AulaCHS = { pdfToLines, parseTemaText, parseTabla, cellsOf, itemsOf };
 
   // Fusiona con lo ya cargado: una pregunta con el mismo enunciado se actualiza; las nuevas se añaden.
   function mergeImport(byId) {

@@ -36,11 +36,11 @@ El progreso se guarda en el `localStorage` del navegador; usa *Progreso → Copi
 
 ## Temas propios incluidos en la plataforma
 
-`js/data-mis-temas.js` contiene los temas elaborados por la persona opositora que ya forman parte de la plataforma (de momento, el tema 3 de Química). Para añadir otro: impórtalo en la sección *Importar*, exporta la copia de seguridad y copia en ese archivo el tema correspondiente de `temas`.
+`js/data-mis-temas.js` contiene los temas elaborados por la persona opositora que ya forman parte de la plataforma: los 32 temas específicos de Química (480 preguntas, cada respuesta cotejada con el solucionario de su PDF). En esos temas no se usan las preguntas de ejemplo de `js/data-quimica.js`, que solo se conserva como respaldo. Para añadir otro: impórtalo en la sección *Importar*, exporta la copia de seguridad y copia en ese archivo el tema correspondiente de `temas`.
 
 ## Lectura de PDF
 
-Los PDF se leen en el navegador con pdf.js 3.11.174, que se descarga desde cdnjs solo al subir un PDF (hace falta conexión). El tema se detecta por la cabecera «Tema N · …» y la palabra «Química» o «parte común»; si no se detecta, se elige en un desplegable antes de cargar.
+Los PDF se leen en el navegador con pdf.js 3.11.174, que se descarga desde cdnjs solo al subir un PDF (hace falta conexión). El tema se detecta por la cabecera «Tema N · …» y «Química (M2)» o «parte común»; si no se detecta, se elige en un desplegable antes de cargar. El lector reconoce el esquema-resumen en forma de lista numerada o de tabla (incluidas tablas de varias columnas y cabeceras en dos líneas), las trampas frecuentes, las preguntas a)–d) y el solucionario.
 
 ## Formato de importación (JSON)
 
