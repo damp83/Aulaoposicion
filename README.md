@@ -18,6 +18,7 @@ Plataforma web para preparar la oposición de **M2 Química** de la **Confederac
 - **Tests por tema** en modo estudio (corrección inmediata con explicación) y modo examen (cronometrado, con hoja de respuestas).
 - **Simulacro personalizado**, **repaso de fallos**, **progreso** con historial y gráfica, **preguntas propias** y **copia de seguridad** en JSON.
 - La sección *Convocatoria* resume las plazas, los requisitos, la solicitud y los ejercicios.
+- **Importar temas propios** (sección *Importar*): pega o sube JSON con temas completos (título, ideas clave y preguntas). Al cargar un tema, sus preguntas de ejemplo dejan de usarse. Si recargas un tema, las preguntas con el mismo enunciado se actualizan y las nuevas se añaden. La página incluye las instrucciones de formato para copiarlas en otra conversación.
 
 ## Uso
 
@@ -32,6 +33,21 @@ node tools/build-single.js
 ```
 
 El progreso se guarda en el `localStorage` del navegador; usa *Progreso → Copia de seguridad* para no perderlo.
+
+## Formato de importación
+
+```json
+{
+  "tema": "q21",
+  "titulo": "Título del tema",
+  "resumen": ["Idea clave 1", "Idea clave 2"],
+  "preguntas": [
+    { "p": "Enunciado", "correcta": "Texto de la correcta", "incorrectas": ["…", "…", "…"], "e": "Explicación" }
+  ]
+}
+```
+
+Códigos: `c01`–`c15` (temario común), `q01`–`q32` (Química) y `a01`–`a11` (complementario). También se aceptan `{"temas": [...]}`, listas de temas, varios bloques seguidos y variantes como `pregunta`/`enunciado`, `opciones` (lista u objeto `{"A": …}`) con `respuesta_correcta` como letra, texto o número.
 
 ## Ampliar el banco de preguntas
 

@@ -9,13 +9,13 @@
   const $main = document.getElementById("app");
 
   // ─────────────────────────── Persistencia ───────────────────────────
-  function emptyState() { return { stats: {}, history: [], custom: [] }; }
+  function emptyState() { return { stats: {}, history: [], custom: [], temas: {} }; }
   function load() {
     try {
       const raw = localStorage.getItem(STORE_KEY);
       if (!raw) return emptyState();
       const s = JSON.parse(raw);
-      return { stats: s.stats || {}, history: s.history || [], custom: s.custom || [] };
+      return { stats: s.stats || {}, history: s.history || [], custom: s.custom || [], temas: s.temas || {} };
     } catch (e) { return emptyState(); }
   }
   let state = load();
@@ -46,9 +46,28 @@
   const bloqueById = {}; T.bloques.forEach((b) => (bloqueById[b.id] = b));
   const oficialIds = () => T.temas.filter((t) => bloqueById[t.bloque].oficial).map((t) => t.id);
 
+  // Temas importados por la persona usuaria: sustituyen título (si lo traen), ideas clave (si las traen)
+  // y TODAS las preguntas de ejemplo de ese tema.
+  const ORIG = {};
+  T.temas.forEach((t) => { ORIG[t.id] = { titulo: t.titulo, resumen: t.resumen, preguntas: t.preguntas }; });
+  function applyImports() {
+    T.temas.forEach((t) => {
+      const o = ORIG[t.id], imp = state.temas[t.id];
+      t.titulo = o.titulo; t.resumen = o.resumen; t.preguntas = o.preguntas; t.mio = false;
+      if (imp && imp.preguntas && imp.preguntas.length) {
+        t.mio = true;
+        t.preguntas = imp.preguntas;
+        if (imp.titulo) t.titulo = imp.titulo;
+        if (imp.resumen && imp.resumen.length) t.resumen = imp.resumen;
+      }
+    });
+  }
+  const hash = (str) => { let h = 5381; for (const ch of String(str).trim().toLowerCase()) h = ((h << 5) + h + ch.codePointAt(0)) | 0; return (h >>> 0).toString(36); };
+  applyImports();
+
   function allQuestions() {
     const out = [];
-    T.temas.forEach((t) => t.preguntas.forEach((q, i) => out.push({ id: t.id + "-" + (i + 1), tema: t.id, p: q[0], o: q[1], e: q[2] || "" })));
+    T.temas.forEach((t) => t.preguntas.forEach((q, i) => out.push({ id: t.mio ? t.id + "-h" + hash(q[0]) : t.id + "-" + (i + 1), tema: t.id, p: q[0], o: q[1], e: q[2] || "", mia: t.mio })));
     state.custom.forEach((q) => { if (temaById[q.tema]) out.push({ id: q.id, tema: q.tema, p: q.p, o: q.o, e: q.e || "", propia: true }); });
     return out;
   }
@@ -177,7 +196,7 @@
       case "simulacro": return renderSimulacro();
       case "fallos": return renderFallos();
       case "progreso": return renderProgreso();
-      case "mis-preguntas": return renderPropias();
+      case "importar": case "mis-preguntas": return renderImportar();
       case "convocatoria": return renderConvocatoria();
       case "test": return session && !session.finished ? renderTest() : go("inicio");
       case "resultado": return session && session.finished ? renderResultado() : go("inicio");
@@ -190,7 +209,7 @@
   // ─────────────────────────── Vistas ───────────────────────────
   function renderInicio() {
     const qs = allQuestions();
-    const answered = Object.values(state.stats);
+    const answered = qs.map((q) => state.stats[q.id]).filter(Boolean);
     const ok = answered.reduce((a, s) => a + s.ok, 0), ko = answered.reduce((a, s) => a + s.ko, 0);
     const dominadas = answered.filter((s) => s.last).length;
     const fallos = failedQuestions().length;
@@ -267,7 +286,7 @@
             const s = temaStats(t.id);
             return `<a class="tema-row" href="#tema-${t.id}">
               <span class="tema-num">${String(t.n).padStart(2, "0")}</span>
-              <div><h3>${esc(t.titulo)}</h3><div class="meta">${esc(t.norma)}</div>
+              <div><h3>${esc(t.titulo)}</h3><div class="meta">${t.mio ? '<span style="color:var(--ok);font-weight:600">Tus preguntas</span> · ' : ""}${esc(t.norma)}</div>
                 <div class="gauge ${s.seen ? gaugeClass(s.cobertura) : ""}"><span style="width:${s.cobertura}%"></span></div></div>
               <span class="score chip ${s.seen ? gaugeClass(s.acierto).replace("bad", "ko") : ""}">${s.seen ? s.acierto + "% acierto" : s.total + " preguntas"}</span>
             </a>`;
@@ -295,7 +314,7 @@
       <section class="panel stack">
         <div class="row" style="justify-content:space-between">
           <h2>Practicar</h2>
-          <span class="chip accent num">${qs.length} preguntas</span>
+          <span class="row" style="gap:6px">${t.mio ? '<span class="chip ok">Tus preguntas</span>' : '<a class="chip mid" href="#importar" style="text-decoration:none">Preguntas de ejemplo · importar las tuyas</a>'}<span class="chip accent num">${qs.length} preguntas</span></span>
         </div>
         <div class="kpis">
           <div class="kpi"><div class="value">${s.cobertura}%</div><div class="label">Dominado (${s.dominadas}/${s.total})</div></div>
@@ -311,7 +330,7 @@
       </section>
 
       <section class="stack">
-        <h2>Ideas clave</h2>
+        <h2>Ideas clave${t.mio && state.temas[t.id].resumen && state.temas[t.id].resumen.length ? "" : ' <span class="chip">de ejemplo</span>'}</h2>
         <ul class="resumen">${t.resumen.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>
       </section>
 
@@ -726,11 +745,11 @@
     const doImport = (txt) => {
       try {
         const d = JSON.parse(txt);
-        if (!d || typeof d !== "object" || (!d.stats && !d.custom && !d.history)) throw new Error();
+        if (!d || typeof d !== "object" || (!d.stats && !d.custom && !d.history && !d.temas)) throw new Error();
         const custom = (d.custom || []).filter(validCustom).map((q, i) => ({ id: q.id || "u-" + Date.now().toString(36) + i, tema: q.tema, p: q.p, o: q.o, e: q.e || "" }));
-        if (d.stats || d.history) {
-          state = { stats: d.stats || {}, history: d.history || [], custom };
-          save(); toast("Copia importada");
+        if (d.stats || d.history || d.temas) {
+          state = { stats: d.stats || {}, history: d.history || [], custom, temas: d.temas || {} };
+          applyImports(); save(); toast("Copia importada");
         } else {
           const ids = new Set(state.custom.map((q) => q.id));
           custom.forEach((q) => { if (!ids.has(q.id)) state.custom.push(q); });
@@ -747,54 +766,326 @@
   }
   const validCustom = (q) => q && typeof q.p === "string" && Array.isArray(q.o) && q.o.length >= 2 && q.o.every((x) => typeof x === "string") && temaById[q.tema];
 
-  // ─────────────────────────── Preguntas propias ───────────────────────────
-  function renderPropias() {
+  // ─────────────────────────── Importar temas ───────────────────────────
+  // Acepta JSON (uno o varios bloques pegados seguidos, con o sin ```json) con temas completos:
+  // { "tema": "q21", "titulo": "…", "resumen": ["…"], "preguntas": [ { "p": "…", "correcta": "…", "incorrectas": ["…"], "e": "…" } ] }
+  // También admite { "temas": [ … ] }, una lista de temas y variantes habituales de nombres de campo.
+
+  function extractJsonValues(text) {
+    const clean = String(text).replace(/^\s*```[a-zA-Z]*\s*$/gm, "").trim();
+    if (!clean) return [];
+    try { return [JSON.parse(clean)]; } catch (e) { /* puede haber varios bloques */ }
+    const out = [];
+    let depth = 0, start = -1, inStr = false, escNext = false;
+    for (let i = 0; i < clean.length; i++) {
+      const c = clean[i];
+      if (inStr) { if (escNext) escNext = false; else if (c === "\\") escNext = true; else if (c === '"') inStr = false; continue; }
+      if (c === '"') { if (depth > 0) inStr = true; continue; }
+      if (c === "{" || c === "[") { if (depth === 0) start = i; depth++; }
+      else if ((c === "}" || c === "]") && depth > 0) {
+        depth--;
+        if (depth === 0 && start >= 0) {
+          const chunk = clean.slice(start, i + 1);
+          try { out.push(JSON.parse(chunk)); } catch (e) { out.push({ __error: "Hay un bloque con JSON mal formado (empieza por: " + chunk.slice(0, 60) + "…)" }); }
+          start = -1;
+        }
+      }
+    }
+    return out;
+  }
+
+  function normTemaId(o) {
+    const raw = [o.tema, o.id, o.codigo, o.código].find((x) => x !== undefined && x !== null && x !== "");
+    const extra = String(o.parte || o.bloque || "");
+    const txt = (String(raw === undefined ? "" : raw) + " " + extra).trim().toLowerCase();
+    let m = txt.match(/^([cqa])\s*[-_ ]?\s*0*(\d{1,2})\b/);
+    if (m) return m[1] + String(m[2]).padStart(2, "0");
+    m = txt.match(/(com[uú]n|qu[ií]mica|espec[ií]fic[oa]|complementari[oa])\D{0,12}0*(\d{1,2})/) || txt.replace(/^(\d{1,2})\s+(.*)$/, "$2 $1").match(/(com[uú]n|qu[ií]mica|espec[ií]fic[oa]|complementari[oa])\D{0,12}0*(\d{1,2})/);
+    if (m) { const L = /^com/.test(m[1]) ? "c" : /^compl/.test(m[1]) ? "a" : "q"; return L + String(m[2]).padStart(2, "0"); }
+    return null;
+  }
+
+  const firstDef = (...xs) => xs.find((x) => x !== undefined && x !== null && x !== "");
+  const LETTER_PREFIX = /^\s*[A-Fa-f]\s*[\)\.\-:]\s+/;
+
+  // Devuelve { q: [enunciado, [correcta, ...incorrectas], explicación] } o { error }
+  function normQuestion(q, numBase) {
+    let p, opts, correct, inc, e;
+    if (Array.isArray(q)) { p = q[0]; opts = Array.isArray(q[1]) ? q[1] : null; correct = 0; e = q[2]; }
+    else if (q && typeof q === "object") {
+      p = firstDef(q.p, q.pregunta, q.enunciado, q.texto);
+      e = firstDef(q.e, q.explicacion, q.explicación, q.justificacion, q.justificación, q.comentario, "");
+      opts = firstDef(q.o, q.opciones, q.respuestas, q.alternativas);
+      correct = firstDef(q.correcta, q.respuesta_correcta, q.respuestaCorrecta, q.solucion, q.solución, q.respuesta);
+      inc = firstDef(q.incorrectas, q.distractores, q.erroneas, q.erróneas);
+      if (opts && !Array.isArray(opts) && typeof opts === "object") {
+        // Opciones como objeto {"A": "…", "B": "…"}: si la correcta es una clave, se sustituye por su texto
+        const keys = Object.keys(opts);
+        const ki = typeof correct === "string" ? keys.findIndex((k) => k.trim().toUpperCase() === correct.trim().replace(/[\)\.]$/, "").toUpperCase()) : -1;
+        const vals = keys.map((k) => String(opts[k]));
+        if (ki >= 0) correct = vals[ki];
+        opts = vals;
+      }
+    } else return { error: "pregunta vacía o con formato desconocido" };
+
+    if (!p || typeof p !== "string" || !p.trim()) return { error: "falta el enunciado" };
+    p = p.trim(); e = e ? String(e).trim() : "";
+
+    if (!opts) {
+      if (correct === undefined || !Array.isArray(inc)) return { error: "faltan las opciones (correcta e incorrectas): «" + p.slice(0, 50) + "…»" };
+      opts = [String(correct), ...inc.map(String)]; correct = 0;
+    } else {
+      opts = opts.map((x) => String(x).trim());
+      if (opts.length && opts.every((x) => LETTER_PREFIX.test(x))) opts = opts.map((x) => x.replace(LETTER_PREFIX, ""));
+      let idx = -1;
+      if (typeof correct === "number") idx = correct - numBase;
+      else if (typeof correct === "string") {
+        const c = correct.trim();
+        const lm = c.match(/^\(?([A-Fa-f])[\)\.]?$/);
+        if (lm) idx = lm[1].toUpperCase().charCodeAt(0) - 65;
+        else if (/^\d+$/.test(c)) idx = parseInt(c, 10) - numBase;
+        else {
+          const cc = c.replace(LETTER_PREFIX, "").toLowerCase();
+          idx = opts.findIndex((x) => x.toLowerCase() === cc);
+        }
+      }
+      if (idx < 0 || idx >= opts.length) return { error: "no se identifica la respuesta correcta: «" + p.slice(0, 50) + "…»" };
+      opts = [opts[idx], ...opts.filter((_, i) => i !== idx)];
+    }
+    opts = opts.map((x) => String(x).trim()).filter(Boolean);
+    if (opts.length < 2) return { error: "necesita al menos dos opciones: «" + p.slice(0, 50) + "…»" };
+    if (new Set(opts.map((x) => x.toLowerCase())).size !== opts.length) return { error: "tiene opciones repetidas: «" + p.slice(0, 50) + "…»" };
+    return { q: [p, opts, e] };
+  }
+
+  function parseImport(text) {
+    const values = extractJsonValues(text);
+    const errores = [], avisos = [], temas = {};
+    if (!values.length) return { temas, errores: ["No se ha encontrado ningún bloque JSON en el texto."], avisos };
+    const temaObjs = [];
+    const collect = (v) => {
+      if (!v) return;
+      if (v.__error) { errores.push(v.__error); return; }
+      if (Array.isArray(v)) { v.forEach(collect); return; }
+      if (typeof v !== "object") return;
+      if (v.app === "aulachs") { errores.push("Eso es una copia de seguridad completa: impórtala en la sección «Copia de seguridad» de más abajo."); return; }
+      if (Array.isArray(v.temas)) { v.temas.forEach(collect); return; }
+      if (Array.isArray(v.preguntas)) { temaObjs.push(v); return; }
+      errores.push("Un bloque no tiene la lista «preguntas».");
+    };
+    values.forEach(collect);
+
+    temaObjs.forEach((o) => {
+      const id = normTemaId(o);
+      const nombre = String(firstDef(o.tema, o.id, o.titulo, "(sin código)"));
+      if (!id || !temaById[id]) { errores.push("Tema «" + nombre + "»: no reconozco el código. Usa c01–c15 (común), q01–q32 (Química) o a01–a11 (complementario)."); return; }
+      // Números de respuesta correcta: si alguna pregunta usa 0, se interpretan empezando en 0; si no, empezando en 1.
+      // Solo cuentan las preguntas con lista de opciones (con "correcta" + "incorrectas", un número es texto de respuesta)
+      const nums = o.preguntas.map((q) => (q && typeof q === "object" && !Array.isArray(q) && Array.isArray(firstDef(q.o, q.opciones, q.respuestas, q.alternativas)) ? firstDef(q.correcta, q.respuesta_correcta, q.respuestaCorrecta, q.solucion, q.respuesta) : undefined)).filter((x) => typeof x === "number" || (typeof x === "string" && /^\d+$/.test(x.trim())));
+      const numBase = nums.some((x) => Number(x) === 0) ? 0 : 1;
+      if (nums.length) avisos.push(temaById[id].label + ": la respuesta correcta viene como número; se ha interpretado empezando en " + numBase + " (" + (numBase ? "1 = A" : "0 = A") + "). Revisa la muestra.");
+      const t = temas[id] || (temas[id] = { titulo: "", resumen: [], preguntas: [] });
+      const tit = firstDef(o.titulo, o.título, o.nombre);
+      if (tit) t.titulo = String(tit).trim();
+      const res = firstDef(o.resumen, o.ideas_clave, o.ideasClave, o.ideas);
+      if (Array.isArray(res)) t.resumen = t.resumen.concat(res.map(String).map((x) => x.trim()).filter(Boolean));
+      else if (typeof res === "string" && res.trim()) t.resumen = t.resumen.concat(res.split(/\n+/).map((x) => x.replace(/^[-•*]\s*/, "").trim()).filter(Boolean));
+      o.preguntas.forEach((q, i) => {
+        const r = normQuestion(q, numBase);
+        if (r.error) errores.push(temaById[id].label + ", pregunta " + (i + 1) + ": " + r.error);
+        else t.preguntas.push(r.q);
+      });
+    });
+    Object.keys(temas).forEach((id) => { if (!temas[id].preguntas.length) delete temas[id]; });
+    return { temas, errores, avisos };
+  }
+
+  // Fusiona con lo ya cargado: una pregunta con el mismo enunciado se actualiza; las nuevas se añaden.
+  function mergeImport(parsed) {
+    const resumen = [];
+    Object.keys(parsed.temas).forEach((id) => {
+      const nuevo = parsed.temas[id];
+      const prev = state.temas[id] || { titulo: "", resumen: [], preguntas: [] };
+      const byHash = new Map(prev.preguntas.map((q, i) => [hash(q[0]), i]));
+      const preguntas = prev.preguntas.slice();
+      let add = 0, upd = 0;
+      nuevo.preguntas.forEach((q) => {
+        const h = hash(q[0]);
+        if (byHash.has(h)) { preguntas[byHash.get(h)] = q; upd++; }
+        else { byHash.set(h, preguntas.length); preguntas.push(q); add++; }
+      });
+      state.temas[id] = {
+        titulo: nuevo.titulo || prev.titulo || "",
+        resumen: nuevo.resumen.length ? nuevo.resumen : prev.resumen || [],
+        preguntas, ts: Date.now()
+      };
+      resumen.push({ id, add, upd, total: preguntas.length });
+    });
+    applyImports(); save();
+    return resumen;
+  }
+
+  const PROMPT_FORMATO = `Cuando termines cada tema, entrégamelo en un bloque JSON con este formato exacto, para importarlo en mi plataforma de estudio (Aula CHS):
+
+{
+  "tema": "q21",
+  "titulo": "Título del tema",
+  "resumen": ["Idea clave 1", "Idea clave 2"],
+  "preguntas": [
+    {
+      "p": "Enunciado de la pregunta",
+      "correcta": "Texto de la respuesta correcta",
+      "incorrectas": ["Incorrecta 1", "Incorrecta 2", "Incorrecta 3"],
+      "e": "Explicación breve y artículo o fuente"
+    }
+  ]
+}
+
+Códigos de tema: c01 a c15 para el temario común del grupo M2 (Anexo VI) y q01 a q32 para el temario específico de Química (Anexo VII), en el orden de la convocatoria. Pon siempre el texto completo de la respuesta correcta en "correcta" (no una letra) y no repitas opciones.`;
+
+  let importPreview = null;
+  function renderImportar() {
+    const cargados = T.temas.filter((t) => t.mio);
+    const oficiales = T.temas.filter((t) => bloqueById[t.bloque].oficial);
+    const nOfMios = oficiales.filter((t) => t.mio).length;
     const mine = state.custom;
     setView(`
       <section class="stack">
-        <span class="eyebrow">Mis preguntas</span>
-        <h1>Añade tus propias preguntas</h1>
-        <p class="lead">Incorpora preguntas de exámenes anteriores o de tus apuntes. Se mezclan con las del tema en los tests y simulacros.</p>
+        <span class="eyebrow">Importar</span>
+        <h1>Carga tus temas y preguntas</h1>
+        <p class="lead">Pega aquí los temas que elaboras en otra conversación. Al cargar un tema, sus preguntas de ejemplo desaparecen y se usan solo las tuyas.</p>
       </section>
-      <form class="panel stack" id="qform">
-        <div class="field"><label for="q-tema">Tema</label>
-          <select id="q-tema">${T.temas.map((t) => `<option value="${t.id}">${t.label}. ${esc(t.titulo)}</option>`).join("")}</select></div>
-        <div class="field"><label for="q-p">Enunciado</label><textarea id="q-p" required></textarea></div>
-        <div class="field"><label for="q-ok" style="color:var(--ok)">Respuesta correcta</label><input type="text" id="q-ok" required></div>
-        <div class="form-grid">
-          ${[1, 2, 3].map((i) => `<div class="field"><label for="q-ko${i}">Incorrecta ${i}</label><input type="text" id="q-ko${i}" ${i === 1 ? "required" : ""}></div>`).join("")}
+
+      <section class="kpis">
+        <div class="kpi"><div class="value">${nOfMios}<small class="muted"> / ${oficiales.length}</small></div><div class="label">Temas oficiales con tus preguntas</div></div>
+        <div class="kpi"><div class="value">${cargados.reduce((a, t) => a + t.preguntas.length, 0)}</div><div class="label">Preguntas tuyas cargadas</div></div>
+      </section>
+
+      <section class="panel stack">
+        <h2>Pegar o subir temas</h2>
+        <div class="field"><label for="imp-temas">JSON de uno o varios temas</label>
+          <textarea id="imp-temas" class="num" style="min-height:180px;font-size:.82rem" placeholder='{"tema":"q21","titulo":"…","resumen":["…"],"preguntas":[{"p":"…","correcta":"…","incorrectas":["…","…","…"],"e":"…"}]}'></textarea></div>
+        <div class="row">
+          <button class="btn btn-primary" id="imp-check">Comprobar</button>
+          <label class="btn" for="imp-temas-file" style="font-weight:600">Subir archivos .json o .txt</label>
+          <input type="file" id="imp-temas-file" accept=".json,.txt,application/json,text/plain" multiple hidden>
+          <button class="btn btn-ghost" id="imp-clear">Vaciar</button>
         </div>
-        <div class="field"><label for="q-e">Explicación o artículo (opcional)</label><input type="text" id="q-e"></div>
-        <div><button class="btn btn-primary" type="submit">Guardar pregunta</button></div>
-      </form>
+        <p class="muted" style="font-size:.9rem">Puedes pegar varios bloques seguidos, tal como te los da la otra conversación (con o sin <code>\`\`\`json</code>). Si vuelves a cargar un tema, las preguntas con el mismo enunciado se actualizan y las nuevas se añaden.</p>
+        <div id="imp-preview"></div>
+      </section>
+
       <section class="stack">
-        <h2>Guardadas (${mine.length})</h2>
-        ${mine.length ? mine.map((q) => `<div class="panel-flat stack" style="gap:6px">
-          <span class="eyebrow">Tema ${temaById[q.tema] ? temaById[q.tema].label : "?"}</span>
+        <h2>Temas cargados (${cargados.length})</h2>
+        ${cargados.length ? `<div class="panel-flat table-wrap"><table>
+          <thead><tr><th>Tema</th><th class="num">Preguntas</th><th class="num">Ideas clave</th><th></th></tr></thead>
+          <tbody>${cargados.map((t) => `<tr>
+            <td><a href="#tema-${t.id}">${t.label}. ${esc(t.titulo)}</a></td>
+            <td class="num">${t.preguntas.length}</td><td class="num">${(state.temas[t.id].resumen || []).length || "—"}</td>
+            <td class="num">${importPreview && importPreview.quitar === t.id
+              ? `<button class="btn btn-sm btn-danger" data-quitar-ok="${t.id}">Confirmar</button> <button class="btn btn-sm" data-quitar-no>Cancelar</button>`
+              : `<button class="btn btn-sm btn-ghost" data-quitar="${t.id}">Quitar</button>`}</td></tr>`).join("")}</tbody>
+        </table></div>
+        <p class="muted" style="font-size:.9rem">Quitar un tema borra tus preguntas de ese tema en este navegador y vuelve a mostrar las de ejemplo.</p>`
+        : `<div class="panel empty">Aún no has cargado ningún tema. Mientras tanto, cada tema muestra preguntas de ejemplo.</div>`}
+      </section>
+
+      <section class="stack">
+        <h2>Formato para la otra conversación</h2>
+        <p class="muted">Copia este texto y pégalo en la conversación donde elaboras los temas, para que te los entregue listos para importar.</p>
+        <pre class="panel-flat num" style="white-space:pre-wrap;font-size:.8rem;margin:0" id="prompt-formato">${esc(PROMPT_FORMATO)}</pre>
+        <div><button class="btn btn-sm" id="copy-prompt">Copiar instrucciones</button></div>
+        <details class="panel-flat"><summary style="cursor:pointer;font-weight:600">Lista de códigos de tema</summary>
+          <div class="table-wrap" style="margin-top:10px"><table><tbody>
+            ${T.temas.map((t) => `<tr><td class="num">${t.id}</td><td>${t.label}. ${esc(ORIG[t.id].titulo)}</td></tr>`).join("")}
+          </tbody></table></div>
+        </details>
+      </section>
+
+      <details class="panel-flat stack">
+        <summary style="cursor:pointer;font-weight:600">Añadir una pregunta suelta (${mine.length} guardadas)</summary>
+        <form class="stack" id="qform" style="margin-top:12px">
+          <div class="field"><label for="q-tema">Tema</label>
+            <select id="q-tema">${T.temas.map((t) => `<option value="${t.id}">${t.label}. ${esc(t.titulo)}</option>`).join("")}</select></div>
+          <div class="field"><label for="q-p">Enunciado</label><textarea id="q-p" required></textarea></div>
+          <div class="field"><label for="q-ok" style="color:var(--ok)">Respuesta correcta</label><input type="text" id="q-ok" required></div>
+          <div class="form-grid">
+            ${[1, 2, 3].map((i) => `<div class="field"><label for="q-ko${i}">Incorrecta ${i}</label><input type="text" id="q-ko${i}" ${i === 1 ? "required" : ""}></div>`).join("")}
+          </div>
+          <div class="field"><label for="q-e">Explicación o artículo (opcional)</label><input type="text" id="q-e"></div>
+          <div><button class="btn btn-primary" type="submit">Guardar pregunta</button></div>
+        </form>
+        ${mine.map((q) => `<div class="stack" style="gap:4px;border-top:1px solid var(--line);padding-top:10px;margin-top:10px">
+          <span class="eyebrow">${temaById[q.tema] ? temaById[q.tema].label : "?"}</span>
           <strong>${esc(q.p)}</strong>
           <span style="color:var(--ok)">${esc(q.o[0])}</span>
-          <span class="muted" style="font-size:.92rem">${q.o.slice(1).map(esc).join(" · ")}</span>
           <div><button class="btn btn-sm btn-danger" data-del="${esc(q.id)}">Eliminar</button></div>
-        </div>`).join("") : `<div class="panel empty">Todavía no has añadido preguntas.</div>`}
-      </section>
+        </div>`).join("")}
+      </details>
+
       <section class="stack">
-        <h2>Importar o exportar</h2>
-        <p class="muted">La copia incluye tus preguntas y tu progreso. También puedes pegar un JSON con una lista de preguntas con el formato <code>{"custom":[{"tema":"t08","p":"…","o":["correcta","incorrecta",…],"e":"…"}]}</code>.</p>
+        <h2>Copia de seguridad</h2>
+        <p class="muted">Tus temas cargados, tus preguntas y tu progreso se guardan solo en este navegador. Exporta una copia de vez en cuando para no perderlos o para pasarlos a otro dispositivo.</p>
         ${backupControls()}
       </section>
     `);
     bindBackup();
+
+    const ta = document.getElementById("imp-temas");
+    const box = document.getElementById("imp-preview");
+    const showPreview = () => {
+      const parsed = parseImport(ta.value);
+      const ids = Object.keys(parsed.temas);
+      const nq = ids.reduce((a, id) => a + parsed.temas[id].preguntas.length, 0);
+      box.innerHTML = `<div class="stack" style="gap:10px">
+        ${ids.map((id) => { const t = parsed.temas[id], q = t.preguntas[0]; return `<div class="panel-flat stack" style="gap:6px">
+          <div class="row" style="justify-content:space-between"><strong>${temaById[id].label}${t.titulo ? ". " + esc(t.titulo) : ""}</strong><span class="chip accent num">${t.preguntas.length} preguntas</span></div>
+          ${temaById[id].mio ? '<span class="chip accent">Ya cargado: se fusiona con tus preguntas</span>' : '<span class="chip mid">Sustituye a las preguntas de ejemplo</span>'}
+          <span class="muted" style="font-size:.9rem">Muestra: ${esc(q[0])}</span>
+          <span style="color:var(--ok);font-size:.9rem">✓ ${esc(q[1][0])}</span>
+        </div>`; }).join("")}
+        ${parsed.avisos.map((a) => `<p class="explain">${esc(a)}</p>`).join("")}
+        ${parsed.errores.length ? `<div class="panel-flat stack" style="gap:4px;border-color:var(--ko)"><strong style="color:var(--ko)">${parsed.errores.length} ${parsed.errores.length === 1 ? "problema" : "problemas"} (esas preguntas no se cargarán)</strong>
+          ${parsed.errores.slice(0, 30).map((e) => `<span style="font-size:.9rem">· ${esc(e)}</span>`).join("")}${parsed.errores.length > 30 ? `<span class="muted">… y ${parsed.errores.length - 30} más</span>` : ""}</div>` : ""}
+        ${nq ? `<div><button class="btn btn-primary" id="imp-load">Cargar ${nq} preguntas en ${ids.length} ${ids.length === 1 ? "tema" : "temas"}</button></div>` : ""}
+      </div>`;
+      const btn = document.getElementById("imp-load");
+      if (btn) btn.onclick = () => {
+        const r = mergeImport(parsed);
+        const add = r.reduce((a, x) => a + x.add, 0), upd = r.reduce((a, x) => a + x.upd, 0);
+        toast(add + " preguntas nuevas" + (upd ? " y " + upd + " actualizadas" : "") + " en " + r.length + (r.length === 1 ? " tema" : " temas"));
+        importPreview = null; renderImportar();
+      };
+    };
+    document.getElementById("imp-check").onclick = showPreview;
+    document.getElementById("imp-clear").onclick = () => { ta.value = ""; box.innerHTML = ""; };
+    document.getElementById("imp-temas-file").onchange = (ev) => {
+      const files = [...ev.target.files]; if (!files.length) return;
+      Promise.all(files.map((f) => f.text())).then((txts) => { ta.value = txts.join("\n\n"); showPreview(); });
+    };
+    document.getElementById("copy-prompt").onclick = () => {
+      navigator.clipboard.writeText(PROMPT_FORMATO).then(() => toast("Instrucciones copiadas"), () => {
+        const r = document.createRange(); r.selectNodeContents(document.getElementById("prompt-formato"));
+        const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r); toast("Texto seleccionado: cópialo");
+      });
+    };
+    $main.querySelectorAll("[data-quitar]").forEach((b) => (b.onclick = () => { importPreview = { quitar: b.dataset.quitar }; renderImportar(); }));
+    $main.querySelectorAll("[data-quitar-no]").forEach((b) => (b.onclick = () => { importPreview = null; renderImportar(); }));
+    $main.querySelectorAll("[data-quitar-ok]").forEach((b) => (b.onclick = () => {
+      delete state.temas[b.dataset.quitarOk]; applyImports(); save(); importPreview = null; toast("Tema restaurado a las preguntas de ejemplo"); renderImportar();
+    }));
+
     document.getElementById("qform").addEventListener("submit", (ev) => {
       ev.preventDefault();
       const v = (id) => document.getElementById(id).value.trim();
       const o = [v("q-ok"), v("q-ko1"), v("q-ko2"), v("q-ko3")].filter(Boolean);
       if (!v("q-p") || o.length < 2) { toast("Escribe el enunciado, la correcta y al menos una incorrecta"); return; }
       state.custom.push({ id: "u-" + Date.now().toString(36), tema: v("q-tema"), p: v("q-p"), o, e: v("q-e") });
-      save(); toast("Pregunta guardada"); renderPropias();
+      save(); toast("Pregunta guardada"); renderImportar();
     });
     $main.querySelectorAll("[data-del]").forEach((b) => (b.onclick = () => {
       state.custom = state.custom.filter((q) => q.id !== b.dataset.del);
-      delete state.stats[b.dataset.del]; save(); renderPropias();
+      delete state.stats[b.dataset.del]; save(); renderImportar();
     }));
   }
 
