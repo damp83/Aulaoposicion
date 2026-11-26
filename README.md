@@ -24,7 +24,7 @@ Plataforma web para preparar la oposición de **M2 Química** de la **Confederac
 
 No necesita instalación ni servidor: abre `index.html` en el navegador.
 
-Para publicarla en GitHub Pages: *Settings → Pages → Build and deployment → Source: Deploy from a branch*, elige la rama `ccr-0026883b-7vuch8` y la carpeta `/ (root)`, y guarda. La web queda en `https://damp83.github.io/aulaoposicion/` y se actualiza sola con cada cambio en esa rama. El archivo `.nojekyll` evita que GitHub procese el sitio con Jekyll.
+Para publicarla en GitHub Pages: *Settings → Pages → Build and deployment → Source: Deploy from a branch*, elige la rama `ccr-0026883b-7vuch8` y la carpeta `/ (root)`, y guarda. La web queda en `https://damp83.github.io/Aulaoposicion/` y se actualiza sola con cada cambio en esa rama. El archivo `.nojekyll` evita que GitHub procese el sitio con Jekyll.
 
 Para generar una versión de un único archivo (`dist/aula-chs.html`):
 
