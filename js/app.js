@@ -227,11 +227,12 @@
     if (session && !session.finished && h !== "test") { /* test abandonado: se conserva para poder volver */ }
     document.querySelectorAll(".nav a").forEach((a) => {
       const v = a.getAttribute("href").slice(1);
-      a.toggleAttribute("aria-current", h === v || (v === "temario" && h.startsWith("tema-")) || (v === "practico" && h.startsWith("practico-")));
+      a.toggleAttribute("aria-current", h === v || (v === "temario" && h.startsWith("tema-")) || (v === "practico" && (h.startsWith("practico-") || h.startsWith("bloque-"))));
       if (a.hasAttribute("aria-current")) a.setAttribute("aria-current", "page");
     });
     if (h.startsWith("tema-") && temaById[h.slice(5)]) return renderTema(h.slice(5));
     if (h.startsWith("practico-") && practicoById(h.slice(9))) return renderPractico(h.slice(9));
+    if (/^bloque-\d+$/.test(h) && BLOQUES_SUP.some((b) => b.n === +h.slice(7))) return renderBloqueSup(+h.slice(7));
     switch (h) {
       case "temario": return renderTemario();
       case "simulacro": return renderSimulacro();
@@ -470,36 +471,81 @@
   }
 
   // ─────────────────────────── Supuestos prácticos ───────────────────────────
-  // Los supuestos propios (importados) sustituyen a los de ejemplo con el mismo id.
+  // Supuestos de la persona opositora (por bloques, en data-supuestos.js) y supuestos importados en JSON.
+  const BLOQUES_SUP = T.supuestosBloques || [];
   function allPracticos() {
-    const propios = state.practicos || [];
+    const propios = (state.practicos || []).map((p) => ({ ...p, importado: true, bloque: 0 }));
     const ids = new Set(propios.map((p) => p.id));
-    return (T.practicos || []).filter((p) => !ids.has(p.id)).map((p) => ({ ...p, ejemplo: true })).concat(propios.map((p) => ({ ...p, propio: true })));
+    const base = BLOQUES_SUP.flatMap((b) => b.supuestos.map((s) => ({ ...s, bloque: b.n })));
+    return base.filter((p) => !ids.has(p.id)).concat(propios);
   }
   const practicoById = (id) => allPracticos().find((p) => p.id === id);
   const respOf = (id) => (state.practicoResp[id] = state.practicoResp[id] || { textos: {}, eval: {}, inicio: 0, fin: 0 });
   let practicoTimer = null;
 
+  // Bloques de contenido: párrafos, listas y tablas
+  function blocksHtml(bl) {
+    return (bl || []).map((b) => {
+      if (b.t === "p") return `<p style="max-width:76ch">${esc(b.x)}</p>`;
+      if (b.t === "ul") return `<ul class="resumen">${b.x.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`;
+      if (b.t === "ol") return `<ol class="resumen">${b.x.map((x) => `<li>${esc(x)}</li>`).join("")}</ol>`;
+      if (b.t === "tabla") return `<div class="table-wrap panel-flat" style="padding:4px 8px"><table class="tabla-sup"><thead><tr>${b.x[0].map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>${b.x.slice(1).map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+      return "";
+    }).join("");
+  }
+  const minutosDe = (t) => { const h = /(\d+(?:,\d+)?)\s*h/.exec(t || ""), m = /(\d+)\s*min/.exec(t || ""); return h ? parseFloat(h[1].replace(",", ".")) * 60 : m ? parseInt(m[1], 10) : 120; };
+  const temasTxt = (p) => (p.temas || []).filter((id) => temaById[id]).map((id) => temaById[id].label).join(" · ");
+  function notaPractico(p, r) {
+    let got = 0, max = 0, n = 0;
+    p.apartados.forEach((a, i) => { const pt = a.puntos || 0; max += pt; const e = r && r.eval[i]; if (e) n++; got += e === "bien" ? pt : e === "regular" ? pt / 2 : 0; });
+    return { got, max: p.puntos || max, n };
+  }
+
   function renderPracticos() {
-    const ps = allPracticos();
     const cv = T.convocatoria.ejercicios[1];
+    const todos = allPracticos();
+    const hechos = todos.filter((p) => { const r = state.practicoResp[p.id]; return r && Object.keys(r.eval).length; }).length;
+    const tarjeta = (p) => {
+      const r = state.practicoResp[p.id], nt = notaPractico(p, r);
+      return `<a class="panel-flat stack" href="#practico-${esc(p.id)}" style="gap:6px;text-decoration:none;color:inherit">
+        <span class="eyebrow">${p.simulacro ? "Simulacro" : "Supuesto " + (p.num || "")} · ${p.puntos ? fmtNum(p.puntos) + " puntos" : p.apartados.length + " apartados"}${p.tiempo ? " · " + esc(p.tiempo) : ""}</span>
+        <strong>${esc(p.titulo)}</strong>
+        ${temasTxt(p) ? `<span class="muted" style="font-size:.85rem">${temasTxt(p)}</span>` : ""}
+        ${nt.n ? `<span class="chip ${nt.got >= nt.max / 2 ? "ok" : "mid"}">Autoevaluado: ${fmtNum(nt.got)} / ${fmtNum(nt.max)}</span>` : `<span class="chip">Sin hacer</span>`}
+      </a>`;
+    };
+    const importados = todos.filter((p) => p.importado);
     setView(`
       <section class="stack">
         <span class="eyebrow">Segundo ejercicio · 0 a 60 puntos</span>
         <h1>Supuestos prácticos</h1>
         <p class="lead">${esc(cv.detalle)}</p>
-        <p class="muted">${esc(cv.puntos)}</p>
+        <p class="muted">${esc(cv.puntos)} Llevas ${hechos} de ${todos.length} supuestos autoevaluados.</p>
       </section>
-      <section class="grid">${ps.map((p) => {
-        const r = state.practicoResp[p.id], ev = r ? Object.values(r.eval) : [];
-        const bien = ev.filter((v) => v === "bien").length;
-        return `<a class="panel-flat stack" href="#practico-${esc(p.id)}" style="gap:8px;text-decoration:none;color:inherit">
-          <span class="eyebrow">${p.propio ? "Tuyo" : "Ejemplo"} · ${p.apartados.length} apartados</span>
-          <strong>${esc(p.titulo)}</strong>
-          <span class="muted" style="font-size:.88rem">${(p.temas || []).filter((id) => temaById[id]).map((id) => temaById[id].label).join(" · ")}</span>
-          ${ev.length ? `<span class="chip ${bien === p.apartados.length ? "ok" : "mid"}">${bien}/${p.apartados.length} apartados bien resueltos</span>` : `<span class="chip">Sin empezar</span>`}
-        </a>`; }).join("")}</section>
-      <p class="notice">Los supuestos de ejemplo están pensados para un laboratorio de aguas y tienen los cálculos comprobados. Si preparas los tuyos en la otra conversación, impórtalos desde <a href="#importar">Importar</a> (formato JSON indicado allí).</p>
+      ${BLOQUES_SUP.map((b) => `
+      <section class="bloque">
+        <div class="bloque-head"><span class="eyebrow">Bloque ${b.n}</span><h2>${esc(b.titulo.replace(/^Supuestos prácticos de /i, "").replace(/^./, (c) => c.toUpperCase()))}</h2></div>
+        <div><a class="btn btn-sm btn-ghost" href="#bloque-${b.n}">Ficha y ${esc(b.tituloFormulario.toLowerCase())}</a></div>
+        <div class="grid">${b.supuestos.map((s) => tarjeta({ ...s, bloque: b.n })).join("")}</div>
+      </section>`).join("")}
+      ${importados.length ? `<section class="bloque"><div class="bloque-head"><span class="eyebrow">Importados</span><h2>Tus supuestos importados</h2></div><div class="grid">${importados.map(tarjeta).join("")}</div></section>` : ""}
+      <p class="notice">Puedes añadir más supuestos desde <a href="#importar">Importar</a> (formato JSON indicado allí).</p>
+    `);
+  }
+
+  function renderBloqueSup(n) {
+    const b = BLOQUES_SUP.find((x) => x.n === n);
+    setView(`
+      <section class="stack">
+        <a href="#practico" class="muted" style="font-size:.92rem">← Supuestos prácticos</a>
+        <span class="eyebrow">Bloque ${b.n}</span>
+        <h1>${esc(b.titulo)}</h1>
+      </section>
+      <section class="stack"><h2>${esc(b.tituloFormulario)}</h2>${blocksHtml(b.formulario)}</section>
+      <details class="panel-flat stack"><summary style="cursor:pointer;font-weight:600">Ficha del bloque</summary><div class="stack" style="margin-top:10px">${blocksHtml(b.ficha)}</div></details>
+      ${b.bibliografia && b.bibliografia.length ? `<details class="panel-flat stack"><summary style="cursor:pointer;font-weight:600">Bibliografía y fuentes</summary><div class="stack" style="margin-top:10px">${blocksHtml(b.bibliografia)}</div></details>` : ""}
+      <section class="stack"><h2>Supuestos del bloque</h2>
+        <ol class="resumen">${b.supuestos.map((s) => `<li><a href="#practico-${esc(s.id)}">${esc(s.titulo)}</a></li>`).join("")}</ol></section>
     `);
   }
 
@@ -507,53 +553,60 @@
     const p = practicoById(id);
     const r = respOf(id);
     const enExamen = r.inicio && !r.fin;
-    const limite = 2 * 3600 * 1000;
+    const limite = minutosDe(p.tiempo) * 60 * 1000;
     const verSol = !enExamen;
-    const idx = allPracticos().findIndex((x) => x.id === id), lista = allPracticos();
+    const lista = allPracticos(), idx = lista.findIndex((x) => x.id === id);
+    const nt = notaPractico(p, r);
     setView(`
       <section class="stack">
         <a href="#practico" class="muted" style="font-size:.92rem">← Supuestos prácticos</a>
-        <span class="eyebrow">${p.propio ? "Supuesto propio" : "Supuesto de ejemplo"} · ${(p.temas || []).filter((t) => temaById[t]).map((t) => temaById[t].label).join(" · ")}</span>
+        <span class="eyebrow">${p.bloque ? "Bloque " + p.bloque + " · " : ""}${p.simulacro ? "Simulacro" : "Supuesto " + (p.num || "")}${p.puntos ? " · " + fmtNum(p.puntos) + " puntos" : ""}${p.tiempo ? " · " + esc(p.tiempo) : ""}</span>
         <h1>${esc(p.titulo)}</h1>
+        ${p.meta ? `<p class="muted" style="font-size:.92rem;max-width:76ch">${esc(p.meta)}</p>` : temasTxt(p) ? `<p class="muted">${temasTxt(p)}</p>` : ""}
       </section>
       <section class="panel stack">
         ${enExamen
           ? `<div class="row" style="justify-content:space-between"><strong>Modo examen en curso</strong><span class="timer" id="ptimer">--:--:--</span></div>
-             <p class="muted" style="font-size:.9rem">Las soluciones se muestran al terminar. Tus respuestas se guardan mientras escribes.</p>
-             <div><button class="btn btn-primary" id="p-fin">Terminar y ver soluciones</button></div>`
+             <p class="muted" style="font-size:.9rem">Las resoluciones se muestran al terminar. Tus respuestas se guardan mientras escribes.</p>
+             <div><button class="btn btn-primary" id="p-fin">Terminar y ver resoluciones</button></div>`
           : `<div class="row">
-               <button class="btn btn-primary" id="p-examen">Hacer en modo examen (2 h)</button>
+               <button class="btn btn-primary" id="p-examen">Hacer en modo examen (${minutosDe(p.tiempo) >= 60 ? fmtNum(minutosDe(p.tiempo) / 60) + " h" : minutosDe(p.tiempo) + " min"})</button>
                ${Object.keys(r.textos).length || Object.keys(r.eval).length ? `<button class="btn btn-ghost" id="p-reset">Borrar mis respuestas</button>` : ""}
              </div>
-             <p class="muted" style="font-size:.9rem">En modo libre puedes ver la solución de cada apartado cuando quieras. En modo examen hay cronómetro de 2 horas y las soluciones quedan ocultas hasta terminar.${r.fin ? " Último intento en modo examen: " + fmtTime((r.fin - r.inicio) / 1000 / 60).replace(":", " h ") + " min." : ""}</p>`}
+             <p class="muted" style="font-size:.9rem">En modo libre puedes abrir la resolución de cada apartado cuando quieras y autoevaluarte. En modo examen corre el tiempo orientativo del supuesto y las resoluciones quedan ocultas hasta terminar.${r.fin ? " Último intento en modo examen: " + Math.round((r.fin - r.inicio) / 60000) + " min." : ""}</p>
+             ${nt.n ? `<div class="explain"><strong>Nota autoevaluada: ${fmtNum(nt.got)} / ${fmtNum(nt.max)}</strong>Bien = puntuación completa del apartado; regular = la mitad; mal = 0. ${nt.n < p.apartados.length ? "Te faltan " + (p.apartados.length - nt.n) + " apartados por evaluar." : ""}</div>` : ""}`}
       </section>
       <section class="stack">
         <h2>Enunciado</h2>
-        ${(p.enunciado || []).map((e) => `<p style="max-width:72ch">${esc(e)}</p>`).join("")}
-        ${p.datos && p.datos.length ? `<div class="panel-flat"><strong>Datos</strong><ul class="resumen" style="margin-top:6px">${p.datos.map((d) => `<li>${esc(d)}</li>`).join("")}</ul></div>` : ""}
+        ${blocksHtml(p.enunciado)}
       </section>
+      ${verSol && p.intro && p.intro.length ? `<details class="panel-flat"><summary style="cursor:pointer;font-weight:600">Planteamiento previo de la resolución</summary><div class="stack" style="margin-top:10px">${blocksHtml(p.intro)}</div></details>` : ""}
       ${p.apartados.map((a, i) => `
       <section class="panel stack">
-        <span class="eyebrow">Apartado ${i + 1}</span>
+        <span class="eyebrow">${a.letra ? "Apartado " + esc(a.letra) : "Resolución completa"}${a.puntos ? " · " + fmtNum(a.puntos) + " puntos" : ""}</span>
         <p class="question">${esc(a.p)}</p>
         <div class="field"><label for="p-resp-${i}">Tu respuesta</label>
-          <textarea id="p-resp-${i}" data-resp="${i}" style="min-height:110px">${esc(r.textos[i] || "")}</textarea></div>
-        ${verSol ? `<details ${r.eval[i] ? "open" : ""}><summary style="cursor:pointer;font-weight:600;color:var(--accent)">Ver solución</summary>
-          <div class="stack" style="gap:8px;margin-top:10px">
-            <ol class="resumen">${(a.pasos || []).map((s) => `<li>${esc(s)}</li>`).join("")}</ol>
-            ${a.resultado ? `<div class="explain"><strong>Resultado</strong>${esc(a.resultado)}</div>` : ""}
-            <div class="row" role="group" aria-label="Autoevaluación del apartado ${i + 1}"><span class="muted" style="font-size:.9rem">¿Cómo te ha salido?</span>
-              ${[["bien", "Bien", "ok"], ["regular", "Regular", "mid"], ["mal", "Mal", "ko"]].map(([v, t, c]) => `<button class="btn btn-sm ${r.eval[i] === v ? "btn-primary" : "btn-ghost"}" data-eval="${i}" data-v="${v}">${t}</button>`).join("")}
+          <textarea id="p-resp-${i}" data-resp="${i}" style="min-height:${p.libre ? 220 : 110}px">${esc(r.textos[i] || "")}</textarea></div>
+        ${verSol ? `<details ${r.eval[i] ? "open" : ""}><summary style="cursor:pointer;font-weight:600;color:var(--accent)">Ver resolución${a.titulo ? ": " + esc(a.titulo) : ""}</summary>
+          <div class="stack" style="gap:10px;margin-top:10px">
+            ${blocksHtml(a.sol)}
+            <div class="row" role="group" aria-label="Autoevaluación"><span class="muted" style="font-size:.9rem">¿Cómo te ha salido?</span>
+              ${[["bien", "Bien", "ok"], ["regular", "Regular", "mid"], ["mal", "Mal", "ko"]].map(([v, t]) => `<button class="btn btn-sm ${r.eval[i] === v ? "btn-primary" : "btn-ghost"}" data-eval="${i}" data-v="${v}">${t}</button>`).join("")}
             </div>
           </div></details>` : ""}
       </section>`).join("")}
+      ${verSol && p.errores && p.errores.length ? `<section class="stack"><h2>Errores típicos</h2><ul class="resumen trampas">${p.errores.map((e) => `<li>${esc(e)}</li>`).join("")}</ul></section>` : ""}
+      ${verSol && p.aprender && p.aprender.length ? `<section class="stack"><h2>Qué aprender de este simulacro</h2>${blocksHtml(p.aprender)}</section>` : ""}
+      ${p.tribunal && p.tribunal.length ? `<section class="stack"><h2>Preguntas del tribunal en la lectura</h2>
+        <p class="muted" style="font-size:.9rem">Tras leer el ejercicio, el tribunal puede dialogar contigo hasta 15 minutos. Intenta responder en voz alta antes de abrir la respuesta.</p>
+        ${p.tribunal.map((t) => `<details class="panel-flat"><summary style="cursor:pointer;font-weight:600">${esc(t.p)}</summary><p style="margin-top:8px">${esc(t.r)}</p></details>`).join("")}</section>` : ""}
       <nav class="row" style="justify-content:space-between">
         ${idx > 0 ? `<a class="btn btn-ghost" href="#practico-${esc(lista[idx - 1].id)}">← Anterior</a>` : "<span></span>"}
         ${idx < lista.length - 1 ? `<a class="btn btn-ghost" href="#practico-${esc(lista[idx + 1].id)}">Siguiente →</a>` : ""}
       </nav>
     `);
     $main.querySelectorAll("[data-resp]").forEach((ta) => (ta.oninput = () => { r.textos[ta.dataset.resp] = ta.value; save(); }));
-    $main.querySelectorAll("[data-eval]").forEach((b) => (b.onclick = () => { r.eval[b.dataset.eval] = b.dataset.v; save(); renderPractico(id); }));
+    $main.querySelectorAll("[data-eval]").forEach((b) => (b.onclick = () => { r.eval[b.dataset.eval] = b.dataset.v; save(); const y = window.scrollY; renderPractico(id); window.scrollTo(0, y); }));
     const on = (k, fn) => { const el = document.getElementById(k); if (el) el.onclick = fn; };
     on("p-examen", () => { r.inicio = Date.now(); r.fin = 0; r.eval = {}; save(); renderPractico(id); });
     on("p-fin", () => { r.fin = Date.now(); save(); renderPractico(id); });
@@ -566,12 +619,13 @@
         if (!el || location.hash !== "#practico-" + id) { clearInterval(practicoTimer); return; }
         const sec = Math.max(0, Math.round(left / 1000));
         el.textContent = Math.floor(sec / 3600) + ":" + String(Math.floor((sec % 3600) / 60)).padStart(2, "0") + ":" + String(sec % 60).padStart(2, "0");
-        el.classList.toggle("warn", left < 10 * 60 * 1000);
+        el.classList.toggle("warn", left < Math.min(10 * 60 * 1000, limite / 6));
         if (left <= 0) { clearInterval(practicoTimer); r.fin = r.inicio + limite; save(); toast("Tiempo agotado"); renderPractico(id); }
       };
       tickP(); practicoTimer = setInterval(tickP, 1000);
     }
   }
+  const fmtNum = (n) => (Math.round(n * 10) / 10).toLocaleString("es-ES");
 
   // Supuestos importados: { "supuesto": {…} } o { "supuestos": [ … ] } o un objeto con «apartados»
   function normPractico(o, i) {
@@ -581,8 +635,13 @@
       id: String(o.id || "u" + hash((o.titulo || "") + i)),
       titulo: String(o.titulo || o.título || "Supuesto práctico"),
       temas: (o.temas || []).map(String),
-      enunciado: arr(o.enunciado), datos: arr(o.datos),
-      apartados: o.apartados.map((a) => ({ p: String(a.p || a.pregunta || a.enunciado || ""), pasos: arr(a.pasos || a.solucion || a.solución), resultado: String(a.resultado || "") })).filter((a) => a.p)
+      enunciado: arr(o.enunciado).map((x) => ({ t: "p", x })).concat(arr(o.datos).length ? [{ t: "ul", x: arr(o.datos) }] : []),
+      tiempo: String(o.tiempo || ""), puntos: o.puntos ? Number(o.puntos) : null, errores: arr(o.errores), tribunal: [], aprender: [],
+      apartados: o.apartados.map((a, k) => {
+        const pasos = arr(a.pasos || a.solucion || a.solución), res = String(a.resultado || "");
+        return { letra: String.fromCharCode(97 + k), p: String(a.p || a.pregunta || a.enunciado || ""), puntos: a.puntos ? Number(a.puntos) : null, titulo: "",
+          sol: [pasos.length ? { t: "ol", x: pasos } : null, res ? { t: "p", x: "Resultado: " + res } : null].filter(Boolean) };
+      }).filter((a) => a.p)
     };
   }
 
@@ -1488,7 +1547,7 @@ Códigos de tema: c01 a c15 para el temario común del grupo M2 (Anexo VI) y q01
         <pre class="panel-flat num" style="white-space:pre-wrap;font-size:.8rem;margin:0" id="prompt-formato">${esc(PROMPT_FORMATO)}</pre>
         <div><button class="btn btn-sm" id="copy-prompt">Copiar instrucciones</button></div>
         <details class="panel-flat"><summary style="cursor:pointer;font-weight:600">Formato de los supuestos prácticos</summary>
-          <p class="muted" style="font-size:.9rem;margin-top:8px">Pega uno o varios supuestos con este formato y pulsa Comprobar. Si el id coincide con uno de ejemplo (p01-p07), lo sustituye.</p>
+          <p class="muted" style="font-size:.9rem;margin-top:8px">Pega uno o varios supuestos con este formato y pulsa Comprobar. Si el id coincide con uno ya cargado, lo sustituye.</p>
           <pre class="num" style="white-space:pre-wrap;font-size:.8rem;margin:0">${esc(`{"supuesto": {
   "id": "s01",
   "titulo": "Determinación de nitratos en un agua subterránea",
@@ -1556,7 +1615,7 @@ Códigos de tema: c01 a c15 para el temario común del grupo M2 (Anexo VI) y q01
         ${parsed.avisos.map((a) => `<p class="explain">${esc(a)}</p>`).join("")}
         ${parsed.errores.length ? `<div class="panel-flat stack" style="gap:4px;border-color:var(--ko)"><strong style="color:var(--ko)">${parsed.errores.length} ${parsed.errores.length === 1 ? "problema" : "problemas"} (esas preguntas no se cargarán)</strong>
           ${parsed.errores.slice(0, 30).map((e) => `<span style="font-size:.9rem">· ${esc(e)}</span>`).join("")}${parsed.errores.length > 30 ? `<span class="muted">… y ${parsed.errores.length - 30} más</span>` : ""}</div>` : ""}
-        ${(parsed.practicos || []).map((pr) => `<div class="panel-flat stack" style="gap:6px"><span class="eyebrow">Supuesto práctico</span><strong>${esc(pr.titulo)}</strong><span class="muted" style="font-size:.9rem">${pr.apartados.length} apartados${pr.datos.length ? " · " + pr.datos.length + " datos" : ""}</span></div>`).join("")}
+        ${(parsed.practicos || []).map((pr) => `<div class="panel-flat stack" style="gap:6px"><span class="eyebrow">Supuesto práctico</span><strong>${esc(pr.titulo)}</strong><span class="muted" style="font-size:.9rem">${pr.apartados.length} ${pr.apartados.length === 1 ? "apartado" : "apartados"}</span></div>`).join("")}
         ${nq || np ? `<div><button class="btn btn-primary" id="imp-load">Cargar ${[nq ? nq + " preguntas" : "", np ? np + (np === 1 ? " supuesto" : " supuestos") : ""].filter(Boolean).join(" y ")}</button></div>` : ""}
       </div>`;
       box.querySelectorAll("[data-entry]").forEach((sel) => (sel.onchange = () => { pending.entries[sel.dataset.entry].id = sel.value || null; }));
