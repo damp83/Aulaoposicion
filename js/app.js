@@ -9,13 +9,13 @@
   const $main = document.getElementById("app");
 
   // ─────────────────────────── Persistencia ───────────────────────────
-  function emptyState() { return { stats: {}, history: [], custom: [], temas: {} }; }
+  function emptyState() { return { stats: {}, history: [], custom: [], temas: {}, cfg: {}, practicos: [], practicoResp: {} }; }
   function load() {
     try {
       const raw = localStorage.getItem(STORE_KEY);
       if (!raw) return emptyState();
       const s = JSON.parse(raw);
-      return { stats: s.stats || {}, history: s.history || [], custom: s.custom || [], temas: s.temas || {} };
+      return { stats: s.stats || {}, history: s.history || [], custom: s.custom || [], temas: s.temas || {}, cfg: s.cfg || {}, practicos: s.practicos || [], practicoResp: s.practicoResp || {} };
     } catch (e) { return emptyState(); }
   }
   let state = load();
@@ -139,8 +139,47 @@
     const s = state.stats[it.q.id] || { ok: 0, ko: 0, last: null, t: 0 };
     const right = it.answer === it.correct;
     if (right) s.ok++; else s.ko++;
+    const prev = srsOf(s);
+    if (!s.f) s.f = Date.now();                       // primera vez que se vio
+    s.box = right ? Math.min((prev ? prev.box : 0) + 1, INTERVALOS.length - 1) : 1;
+    s.due = startOfDay(Date.now()) + INTERVALOS[s.box] * DIA;
     s.last = right; s.t = Date.now();
     state.stats[it.q.id] = s; save();
+  }
+
+  // ─────────────────────────── Repetición espaciada (cajas de Leitner) ───────────────────────────
+  // Caja 1: fallada o recién vista (vuelve mañana). Cada acierto la sube de caja y alarga el intervalo.
+  const DIA = 86400000;
+  const INTERVALOS = [0, 1, 3, 7, 15, 30, 60];        // días hasta el siguiente repaso según la caja (1-6)
+  const startOfDay = (ts) => { const d = new Date(ts); d.setHours(0, 0, 0, 0); return d.getTime(); };
+  function srsOf(s) {
+    if (!s) return null;
+    if (s.box) return { box: s.box, due: s.due };
+    const box = s.last ? 2 : 1;                       // progreso anterior a esta función
+    return { box, due: startOfDay(s.t || Date.now()) + INTERVALOS[box] * DIA };
+  }
+  const cfg = (k, def) => (state.cfg && state.cfg[k] !== undefined ? state.cfg[k] : def);
+  function repasoHoy() {
+    const ofi = oficialIds();
+    const qs = allQuestions().filter((q) => ofi.includes(q.tema));
+    const finHoy = startOfDay(Date.now()) + DIA;
+    const pendientes = qs.filter((q) => { const r = srsOf(state.stats[q.id]); return r && r.due < finHoy; })
+      .sort((a, b) => srsOf(state.stats[a.id]).due - srsOf(state.stats[b.id]).due);
+    const vistasHoy = qs.filter((q) => state.stats[q.id] && (state.stats[q.id].f || 0) >= startOfDay(Date.now())).length;
+    const cupo = Math.max(0, cfg("nuevas", 20) - vistasHoy);
+    let sinVer = qs.filter((q) => !state.stats[q.id]);
+    if (cfg("ordenNuevas", "temario") === "azar") sinVer = shuffle(sinVer);
+    const nuevas = sinVer.slice(0, cupo);
+    const cajas = [0, 0, 0, 0, 0, 0, 0];
+    qs.forEach((q) => { const r = srsOf(state.stats[q.id]); cajas[r ? r.box : 0]++; });
+    const prevision = [...Array(7)].map((_, d) => qs.filter((q) => { const r = srsOf(state.stats[q.id]); return r && r.due >= finHoy + (d - 1) * DIA && r.due < finHoy + d * DIA; }).length);
+    return { pendientes, nuevas, cajas, prevision, total: qs.length, vistasHoy, sinVer: sinVer.length };
+  }
+  function startRepaso() {
+    const r = repasoHoy();
+    const lote = r.pendientes.concat(r.nuevas).slice(0, cfg("lote", 40));
+    if (!lote.length) { toast("Hoy no te queda nada pendiente"); return; }
+    startTest({ questions: lote, mode: "estudio", titulo: "Repaso de hoy", back: "repaso" });
   }
 
   function finishTest() {
@@ -188,16 +227,19 @@
     if (session && !session.finished && h !== "test") { /* test abandonado: se conserva para poder volver */ }
     document.querySelectorAll(".nav a").forEach((a) => {
       const v = a.getAttribute("href").slice(1);
-      a.toggleAttribute("aria-current", h === v || (v === "temario" && h.startsWith("tema-")));
+      a.toggleAttribute("aria-current", h === v || (v === "temario" && h.startsWith("tema-")) || (v === "practico" && h.startsWith("practico-")));
       if (a.hasAttribute("aria-current")) a.setAttribute("aria-current", "page");
     });
     if (h.startsWith("tema-") && temaById[h.slice(5)]) return renderTema(h.slice(5));
+    if (h.startsWith("practico-") && practicoById(h.slice(9))) return renderPractico(h.slice(9));
     switch (h) {
       case "temario": return renderTemario();
       case "simulacro": return renderSimulacro();
       case "fallos": return renderFallos();
       case "progreso": return renderProgreso();
       case "importar": case "mis-preguntas": return renderImportar();
+      case "repaso": return renderRepaso();
+      case "practico": return renderPracticos();
       case "convocatoria": return renderConvocatoria();
       case "test": return session && !session.finished ? renderTest() : go("inicio");
       case "resultado": return session && session.finished ? renderResultado() : go("inicio");
@@ -231,6 +273,8 @@
           ${fallos ? `<a class="btn" href="#fallos">Repasar ${fallos} fallos</a>` : ""}
         </div>
       </section>
+
+      ${repasoCard()}
 
       <section class="kpis">
         <div class="kpi"><div class="value">${pct(dominadas, qs.length)}<small>%</small></div><div class="label">Temario dominado (${dominadas}/${qs.length})</div></div>
@@ -270,6 +314,7 @@
     const ofi = oficialIds();
     document.getElementById("quick").onclick = () => startTest({ questions: qs.filter((q) => ofi.includes(q.tema)), limit: 10, mode: "estudio", titulo: "Test rápido", back: "inicio" });
     document.getElementById("oficial").onclick = startOficial;
+    $main.querySelectorAll("[data-repaso]").forEach((b) => (b.onclick = startRepaso));
     bindExamCard();
   }
 
@@ -357,6 +402,188 @@
     document.getElementById("estudio").onclick = () => startTest({ questions: qs, mode: "estudio", titulo, back: "tema-" + id });
     document.getElementById("examen").onclick = () => startTest({ questions: qs, mode: "examen", minutes: qs.length, penalty: 1 / 3, titulo, back: "tema-" + id });
     document.getElementById("rfallos").onclick = () => startTest({ questions: fallos, mode: "estudio", titulo: titulo + " (falladas)", back: "tema-" + id });
+  }
+
+  // ─────────────────────────── Repaso de hoy ───────────────────────────
+  const NOMBRE_CAJA = ["Sin ver", "Aprendiendo", "Aprendiendo", "Repasando", "Repasando", "Consolidada", "Dominada"];
+  function repasoCard() {
+    const r = repasoHoy();
+    const n = Math.min(r.pendientes.length + r.nuevas.length, cfg("lote", 40));
+    return `<section class="panel stack">
+      <div class="row" style="justify-content:space-between">
+        <div class="stack" style="gap:4px"><span class="eyebrow">Repetición espaciada · temario oficial</span><h2>Repaso de hoy</h2></div>
+        <a href="#repaso" style="font-size:.92rem">Cómo funciona</a>
+      </div>
+      ${n ? `<p>${r.pendientes.length} ${r.pendientes.length === 1 ? "pregunta pendiente" : "preguntas pendientes"} de repasar y ${r.nuevas.length} ${r.nuevas.length === 1 ? "nueva" : "nuevas"}.</p>
+      <div><button class="btn btn-primary" data-repaso>Empezar repaso · ${n} preguntas</button></div>`
+      : `<p>Has terminado el repaso de hoy. ${r.prevision[1] ? "Mañana te esperan " + r.prevision[1] + " preguntas." : ""}</p>`}
+    </section>`;
+  }
+
+  function renderRepaso() {
+    const r = repasoHoy();
+    const maxPrev = Math.max(1, ...r.prevision);
+    const grupos = [
+      { n: "Sin ver", v: r.cajas[0], c: "" },
+      { n: "Aprendiendo", v: r.cajas[1] + r.cajas[2], c: "ko" },
+      { n: "Repasando", v: r.cajas[3] + r.cajas[4], c: "mid" },
+      { n: "Consolidadas", v: r.cajas[5] + r.cajas[6], c: "ok" }
+    ];
+    const dias = ["Hoy", "Mañana", "+2 días", "+3 días", "+4 días", "+5 días", "+6 días"];
+    setView(`
+      <section class="stack">
+        <span class="eyebrow">Repaso</span>
+        <h1>Repaso de hoy</h1>
+        <p class="lead">Cada día te pregunta lo que toca: las que fallas vuelven al día siguiente y las que aciertas reaparecen cada vez más espaciadas (1, 3, 7, 15, 30 y 60 días). Cuenta todo lo que respondes en la app, también en tests y simulacros.</p>
+      </section>
+      ${repasoCard()}
+      <section class="stack">
+        <h2>Tu memoria del temario oficial</h2>
+        <div class="kpis">${grupos.map((g) => `<div class="kpi"><div class="value" ${g.c ? `style="color:var(--${g.c})"` : ""}>${g.v}</div><div class="label">${g.n}</div></div>`).join("")}</div>
+        <div class="gauge" style="height:14px;display:flex">${grupos.slice(1).map((g) => `<span style="position:static;width:${(100 * g.v) / r.total}%;background:var(--${g.c});border-radius:0"></span>`).join("")}</div>
+        <p class="muted" style="font-size:.9rem">${r.total} preguntas del temario oficial. «Consolidadas»: acertadas al menos cinco veces seguidas en repasos espaciados.</p>
+      </section>
+      <section class="stack">
+        <h2>Próximos días</h2>
+        <div class="panel-flat stack" style="gap:8px">${r.prevision.map((v, d) => `
+          <div class="row" style="gap:10px;flex-wrap:nowrap"><span class="num" style="width:72px;flex:none;font-size:.9rem">${dias[d]}</span>
+            <div class="gauge" style="flex:1"><span style="width:${(100 * v) / maxPrev}%"></span></div>
+            <span class="num" style="width:36px;text-align:right">${v}</span></div>`).join("")}</div>
+        <p class="muted" style="font-size:.9rem">Preguntas ya vistas que vencen cada día (sin contar las nuevas).</p>
+      </section>
+      <section class="panel stack">
+        <h2>Ajustes</h2>
+        <div class="form-grid">
+          <div class="field"><label for="cfg-nuevas">Preguntas nuevas al día</label>
+            <select id="cfg-nuevas">${[0, 10, 20, 30, 45, 60].map((v) => `<option value="${v}" ${cfg("nuevas", 20) === v ? "selected" : ""}>${v}</option>`).join("")}</select></div>
+          <div class="field"><label for="cfg-lote">Máximo de preguntas por sesión</label>
+            <select id="cfg-lote">${[20, 40, 60, 100].map((v) => `<option value="${v}" ${cfg("lote", 40) === v ? "selected" : ""}>${v}</option>`).join("")}</select></div>
+          <div class="field"><label for="cfg-orden">Orden de las preguntas nuevas</label>
+            <select id="cfg-orden"><option value="temario" ${cfg("ordenNuevas", "temario") === "temario" ? "selected" : ""}>Por orden del temario</option><option value="azar" ${cfg("ordenNuevas", "temario") === "azar" ? "selected" : ""}>Al azar entre todos los temas</option></select></div>
+        </div>
+        <p class="muted" style="font-size:.9rem">Con 20 nuevas al día verías las ${r.total} preguntas en unas ${Math.ceil(r.sinVer / Math.max(1, cfg("nuevas", 20)))} jornadas más. Hoy has visto ${r.vistasHoy} por primera vez.</p>
+      </section>
+    `);
+    $main.querySelectorAll("[data-repaso]").forEach((b) => (b.onclick = startRepaso));
+    const set = (id, k, num) => (document.getElementById(id).onchange = (ev) => { state.cfg = state.cfg || {}; state.cfg[k] = num ? parseInt(ev.target.value, 10) : ev.target.value; save(); renderRepaso(); });
+    set("cfg-nuevas", "nuevas", true); set("cfg-lote", "lote", true); set("cfg-orden", "ordenNuevas", false);
+  }
+
+  // ─────────────────────────── Supuestos prácticos ───────────────────────────
+  // Los supuestos propios (importados) sustituyen a los de ejemplo con el mismo id.
+  function allPracticos() {
+    const propios = state.practicos || [];
+    const ids = new Set(propios.map((p) => p.id));
+    return (T.practicos || []).filter((p) => !ids.has(p.id)).map((p) => ({ ...p, ejemplo: true })).concat(propios.map((p) => ({ ...p, propio: true })));
+  }
+  const practicoById = (id) => allPracticos().find((p) => p.id === id);
+  const respOf = (id) => (state.practicoResp[id] = state.practicoResp[id] || { textos: {}, eval: {}, inicio: 0, fin: 0 });
+  let practicoTimer = null;
+
+  function renderPracticos() {
+    const ps = allPracticos();
+    const cv = T.convocatoria.ejercicios[1];
+    setView(`
+      <section class="stack">
+        <span class="eyebrow">Segundo ejercicio · 0 a 60 puntos</span>
+        <h1>Supuestos prácticos</h1>
+        <p class="lead">${esc(cv.detalle)}</p>
+        <p class="muted">${esc(cv.puntos)}</p>
+      </section>
+      <section class="grid">${ps.map((p) => {
+        const r = state.practicoResp[p.id], ev = r ? Object.values(r.eval) : [];
+        const bien = ev.filter((v) => v === "bien").length;
+        return `<a class="panel-flat stack" href="#practico-${esc(p.id)}" style="gap:8px;text-decoration:none;color:inherit">
+          <span class="eyebrow">${p.propio ? "Tuyo" : "Ejemplo"} · ${p.apartados.length} apartados</span>
+          <strong>${esc(p.titulo)}</strong>
+          <span class="muted" style="font-size:.88rem">${(p.temas || []).filter((id) => temaById[id]).map((id) => temaById[id].label).join(" · ")}</span>
+          ${ev.length ? `<span class="chip ${bien === p.apartados.length ? "ok" : "mid"}">${bien}/${p.apartados.length} apartados bien resueltos</span>` : `<span class="chip">Sin empezar</span>`}
+        </a>`; }).join("")}</section>
+      <p class="notice">Los supuestos de ejemplo están pensados para un laboratorio de aguas y tienen los cálculos comprobados. Si preparas los tuyos en la otra conversación, impórtalos desde <a href="#importar">Importar</a> (formato JSON indicado allí).</p>
+    `);
+  }
+
+  function renderPractico(id) {
+    const p = practicoById(id);
+    const r = respOf(id);
+    const enExamen = r.inicio && !r.fin;
+    const limite = 2 * 3600 * 1000;
+    const verSol = !enExamen;
+    const idx = allPracticos().findIndex((x) => x.id === id), lista = allPracticos();
+    setView(`
+      <section class="stack">
+        <a href="#practico" class="muted" style="font-size:.92rem">← Supuestos prácticos</a>
+        <span class="eyebrow">${p.propio ? "Supuesto propio" : "Supuesto de ejemplo"} · ${(p.temas || []).filter((t) => temaById[t]).map((t) => temaById[t].label).join(" · ")}</span>
+        <h1>${esc(p.titulo)}</h1>
+      </section>
+      <section class="panel stack">
+        ${enExamen
+          ? `<div class="row" style="justify-content:space-between"><strong>Modo examen en curso</strong><span class="timer" id="ptimer">--:--:--</span></div>
+             <p class="muted" style="font-size:.9rem">Las soluciones se muestran al terminar. Tus respuestas se guardan mientras escribes.</p>
+             <div><button class="btn btn-primary" id="p-fin">Terminar y ver soluciones</button></div>`
+          : `<div class="row">
+               <button class="btn btn-primary" id="p-examen">Hacer en modo examen (2 h)</button>
+               ${Object.keys(r.textos).length || Object.keys(r.eval).length ? `<button class="btn btn-ghost" id="p-reset">Borrar mis respuestas</button>` : ""}
+             </div>
+             <p class="muted" style="font-size:.9rem">En modo libre puedes ver la solución de cada apartado cuando quieras. En modo examen hay cronómetro de 2 horas y las soluciones quedan ocultas hasta terminar.${r.fin ? " Último intento en modo examen: " + fmtTime((r.fin - r.inicio) / 1000 / 60).replace(":", " h ") + " min." : ""}</p>`}
+      </section>
+      <section class="stack">
+        <h2>Enunciado</h2>
+        ${(p.enunciado || []).map((e) => `<p style="max-width:72ch">${esc(e)}</p>`).join("")}
+        ${p.datos && p.datos.length ? `<div class="panel-flat"><strong>Datos</strong><ul class="resumen" style="margin-top:6px">${p.datos.map((d) => `<li>${esc(d)}</li>`).join("")}</ul></div>` : ""}
+      </section>
+      ${p.apartados.map((a, i) => `
+      <section class="panel stack">
+        <span class="eyebrow">Apartado ${i + 1}</span>
+        <p class="question">${esc(a.p)}</p>
+        <div class="field"><label for="p-resp-${i}">Tu respuesta</label>
+          <textarea id="p-resp-${i}" data-resp="${i}" style="min-height:110px">${esc(r.textos[i] || "")}</textarea></div>
+        ${verSol ? `<details ${r.eval[i] ? "open" : ""}><summary style="cursor:pointer;font-weight:600;color:var(--accent)">Ver solución</summary>
+          <div class="stack" style="gap:8px;margin-top:10px">
+            <ol class="resumen">${(a.pasos || []).map((s) => `<li>${esc(s)}</li>`).join("")}</ol>
+            ${a.resultado ? `<div class="explain"><strong>Resultado</strong>${esc(a.resultado)}</div>` : ""}
+            <div class="row" role="group" aria-label="Autoevaluación del apartado ${i + 1}"><span class="muted" style="font-size:.9rem">¿Cómo te ha salido?</span>
+              ${[["bien", "Bien", "ok"], ["regular", "Regular", "mid"], ["mal", "Mal", "ko"]].map(([v, t, c]) => `<button class="btn btn-sm ${r.eval[i] === v ? "btn-primary" : "btn-ghost"}" data-eval="${i}" data-v="${v}">${t}</button>`).join("")}
+            </div>
+          </div></details>` : ""}
+      </section>`).join("")}
+      <nav class="row" style="justify-content:space-between">
+        ${idx > 0 ? `<a class="btn btn-ghost" href="#practico-${esc(lista[idx - 1].id)}">← Anterior</a>` : "<span></span>"}
+        ${idx < lista.length - 1 ? `<a class="btn btn-ghost" href="#practico-${esc(lista[idx + 1].id)}">Siguiente →</a>` : ""}
+      </nav>
+    `);
+    $main.querySelectorAll("[data-resp]").forEach((ta) => (ta.oninput = () => { r.textos[ta.dataset.resp] = ta.value; save(); }));
+    $main.querySelectorAll("[data-eval]").forEach((b) => (b.onclick = () => { r.eval[b.dataset.eval] = b.dataset.v; save(); renderPractico(id); }));
+    const on = (k, fn) => { const el = document.getElementById(k); if (el) el.onclick = fn; };
+    on("p-examen", () => { r.inicio = Date.now(); r.fin = 0; r.eval = {}; save(); renderPractico(id); });
+    on("p-fin", () => { r.fin = Date.now(); save(); renderPractico(id); });
+    on("p-reset", () => { state.practicoResp[id] = { textos: {}, eval: {}, inicio: 0, fin: 0 }; save(); renderPractico(id); });
+    clearInterval(practicoTimer);
+    if (enExamen) {
+      const tickP = () => {
+        const left = limite - (Date.now() - r.inicio);
+        const el = document.getElementById("ptimer");
+        if (!el || location.hash !== "#practico-" + id) { clearInterval(practicoTimer); return; }
+        const sec = Math.max(0, Math.round(left / 1000));
+        el.textContent = Math.floor(sec / 3600) + ":" + String(Math.floor((sec % 3600) / 60)).padStart(2, "0") + ":" + String(sec % 60).padStart(2, "0");
+        el.classList.toggle("warn", left < 10 * 60 * 1000);
+        if (left <= 0) { clearInterval(practicoTimer); r.fin = r.inicio + limite; save(); toast("Tiempo agotado"); renderPractico(id); }
+      };
+      tickP(); practicoTimer = setInterval(tickP, 1000);
+    }
+  }
+
+  // Supuestos importados: { "supuesto": {…} } o { "supuestos": [ … ] } o un objeto con «apartados»
+  function normPractico(o, i) {
+    if (!o || !Array.isArray(o.apartados) || !o.apartados.length) return null;
+    const arr = (x) => (Array.isArray(x) ? x.map(String) : x ? String(x).split(/\n+/) : []).map((t) => t.trim()).filter(Boolean);
+    return {
+      id: String(o.id || "u" + hash((o.titulo || "") + i)),
+      titulo: String(o.titulo || o.título || "Supuesto práctico"),
+      temas: (o.temas || []).map(String),
+      enunciado: arr(o.enunciado), datos: arr(o.datos),
+      apartados: o.apartados.map((a) => ({ p: String(a.p || a.pregunta || a.enunciado || ""), pasos: arr(a.pasos || a.solucion || a.solución), resultado: String(a.resultado || "") })).filter((a) => a.p)
+    };
   }
 
   function examCard() {
@@ -762,7 +989,7 @@
         if (!d || typeof d !== "object" || (!d.stats && !d.custom && !d.history && !d.temas)) throw new Error();
         const custom = (d.custom || []).filter(validCustom).map((q, i) => ({ id: q.id || "u-" + Date.now().toString(36) + i, tema: q.tema, p: q.p, o: q.o, e: q.e || "" }));
         if (d.stats || d.history || d.temas) {
-          state = { stats: d.stats || {}, history: d.history || [], custom, temas: d.temas || {} };
+          state = { stats: d.stats || {}, history: d.history || [], custom, temas: d.temas || {}, cfg: d.cfg || {}, practicos: d.practicos || [], practicoResp: d.practicoResp || {} };
           applyImports(); save(); toast("Copia importada");
         } else {
           const ids = new Set(state.custom.map((q) => q.id));
@@ -880,13 +1107,17 @@
       if (/solucionario/i.test(text)) return parseTemaText(String(text).split(/\r?\n/), origen || "Texto pegado");
       return { entries: [], errores: ["No se ha encontrado ningún bloque JSON ni un tema con preguntas y solucionario."], avisos };
     }
-    const temaObjs = [];
+    const temaObjs = [], practicos = [];
     const collect = (v) => {
       if (!v) return;
       if (v.__error) { errores.push(v.__error); return; }
       if (Array.isArray(v)) { v.forEach(collect); return; }
       if (typeof v !== "object") return;
       if (v.app === "aulachs") { errores.push("Eso es una copia de seguridad completa: impórtala en la sección «Copia de seguridad» de más abajo."); return; }
+      // Un supuesto se reconoce primero: su campo «temas» es la lista de temas relacionados, no temas que importar
+      if (Array.isArray(v.apartados)) { const pr = normPractico(v, practicos.length); if (pr) practicos.push(pr); else errores.push("Un supuesto no tiene apartados válidos."); return; }
+      if (Array.isArray(v.supuestos)) { v.supuestos.forEach(collect); return; }
+      if (v.supuesto && typeof v.supuesto === "object") { collect(v.supuesto); return; }
       if (Array.isArray(v.temas)) { v.temas.forEach(collect); return; }
       if (Array.isArray(v.preguntas)) { temaObjs.push(v); return; }
       errores.push("Un bloque no tiene la lista «preguntas».");
@@ -915,7 +1146,7 @@
       });
     });
     const entries = Object.keys(temas).filter((id) => temas[id].preguntas.length).map((id) => ({ id, ...temas[id], origen: origen || "JSON" }));
-    return { entries, errores, avisos };
+    return { entries, errores, avisos, practicos };
   }
 
   // ── Lectura de temas con el modelo de PDF: portada (número y título), «Esquema-resumen» con «Trampas
@@ -1256,6 +1487,19 @@ Códigos de tema: c01 a c15 para el temario común del grupo M2 (Anexo VI) y q01
         <p class="muted">Los PDF con tu modelo de tema se importan directamente. Si alguna vez prefieres pasar solo preguntas sueltas, copia este texto en la conversación donde elaboras los temas para que te las entregue en JSON.</p>
         <pre class="panel-flat num" style="white-space:pre-wrap;font-size:.8rem;margin:0" id="prompt-formato">${esc(PROMPT_FORMATO)}</pre>
         <div><button class="btn btn-sm" id="copy-prompt">Copiar instrucciones</button></div>
+        <details class="panel-flat"><summary style="cursor:pointer;font-weight:600">Formato de los supuestos prácticos</summary>
+          <p class="muted" style="font-size:.9rem;margin-top:8px">Pega uno o varios supuestos con este formato y pulsa Comprobar. Si el id coincide con uno de ejemplo (p01-p07), lo sustituye.</p>
+          <pre class="num" style="white-space:pre-wrap;font-size:.8rem;margin:0">${esc(`{"supuesto": {
+  "id": "s01",
+  "titulo": "Determinación de nitratos en un agua subterránea",
+  "temas": ["q28", "q13"],
+  "enunciado": ["Párrafo 1", "Párrafo 2"],
+  "datos": ["Dato 1", "Dato 2"],
+  "apartados": [
+    { "p": "Pregunta del apartado", "pasos": ["Paso 1", "Paso 2"], "resultado": "Resultado final" }
+  ]
+}}`)}</pre>
+        </details>
         <details class="panel-flat"><summary style="cursor:pointer;font-weight:600">Lista de códigos de tema</summary>
           <div class="table-wrap" style="margin-top:10px"><table><tbody>
             ${T.temas.map((t) => `<tr><td class="num">${t.id}</td><td>${t.label}. ${esc(ORIG[t.id].titulo)}</td></tr>`).join("")}
@@ -1299,6 +1543,7 @@ Códigos de tema: c01 a c15 para el temario común del grupo M2 (Anexo VI) y q01
     const renderPending = () => {
       const parsed = pending;
       const nq = parsed.entries.reduce((a, e) => a + e.preguntas.length, 0);
+      const np = (parsed.practicos || []).length;
       box.innerHTML = `<div class="stack" style="gap:10px">
         ${parsed.entries.map((e, i) => { const q = e.preguntas[0]; return `<div class="panel-flat stack" style="gap:8px">
           <div class="row" style="justify-content:space-between"><span class="eyebrow">${esc(e.origen)}</span><span class="chip accent num">${e.preguntas.length} preguntas · ${e.resumen.length} ideas clave</span></div>
@@ -1311,12 +1556,15 @@ Códigos de tema: c01 a c15 para el temario común del grupo M2 (Anexo VI) y q01
         ${parsed.avisos.map((a) => `<p class="explain">${esc(a)}</p>`).join("")}
         ${parsed.errores.length ? `<div class="panel-flat stack" style="gap:4px;border-color:var(--ko)"><strong style="color:var(--ko)">${parsed.errores.length} ${parsed.errores.length === 1 ? "problema" : "problemas"} (esas preguntas no se cargarán)</strong>
           ${parsed.errores.slice(0, 30).map((e) => `<span style="font-size:.9rem">· ${esc(e)}</span>`).join("")}${parsed.errores.length > 30 ? `<span class="muted">… y ${parsed.errores.length - 30} más</span>` : ""}</div>` : ""}
-        ${nq ? `<div><button class="btn btn-primary" id="imp-load">Cargar ${nq} preguntas</button></div>` : ""}
+        ${(parsed.practicos || []).map((pr) => `<div class="panel-flat stack" style="gap:6px"><span class="eyebrow">Supuesto práctico</span><strong>${esc(pr.titulo)}</strong><span class="muted" style="font-size:.9rem">${pr.apartados.length} apartados${pr.datos.length ? " · " + pr.datos.length + " datos" : ""}</span></div>`).join("")}
+        ${nq || np ? `<div><button class="btn btn-primary" id="imp-load">Cargar ${[nq ? nq + " preguntas" : "", np ? np + (np === 1 ? " supuesto" : " supuestos") : ""].filter(Boolean).join(" y ")}</button></div>` : ""}
       </div>`;
       box.querySelectorAll("[data-entry]").forEach((sel) => (sel.onchange = () => { pending.entries[sel.dataset.entry].id = sel.value || null; }));
       const btn = document.getElementById("imp-load");
       if (btn) btn.onclick = () => {
         if (pending.entries.some((e) => !e.id)) { toast("Elige el tema de destino de cada bloque"); return; }
+        (pending.practicos || []).forEach((pr) => { state.practicos = (state.practicos || []).filter((x) => x.id !== pr.id).concat([pr]); });
+        if (!pending.entries.length) { save(); toast((pending.practicos || []).length + " supuestos cargados"); importPreview = null; renderImportar(); return; }
         const byId = {};
         pending.entries.forEach((e) => {
           const t = byId[e.id] || (byId[e.id] = { titulo: "", resumen: [], preguntas: [] });
@@ -1336,13 +1584,13 @@ Códigos de tema: c01 a c15 para el temario común del grupo M2 (Anexo VI) y q01
     document.getElementById("imp-temas-file").onchange = async (ev) => {
       const files = [...ev.target.files]; ev.target.value = ""; if (!files.length) return;
       box.innerHTML = `<p class="muted">Leyendo ${files.length} ${files.length === 1 ? "archivo" : "archivos"}…</p>`;
-      const acc = { entries: [], errores: [], avisos: [] };
+      const acc = { entries: [], errores: [], avisos: [], practicos: [] };
       for (const f of files) {
         try {
           let r;
           if (/\.pdf$/i.test(f.name) || f.type === "application/pdf") r = parseTemaText(await pdfToLines(await f.arrayBuffer()), f.name);
           else r = parseImport(await f.text(), f.name);
-          acc.entries.push(...r.entries); acc.errores.push(...r.errores); acc.avisos.push(...r.avisos);
+          acc.entries.push(...r.entries); acc.errores.push(...r.errores); acc.avisos.push(...r.avisos); acc.practicos.push(...(r.practicos || []));
         } catch (e) {
           acc.errores.push(f.name + ": no se ha podido leer (" + (e && e.message ? e.message : "error desconocido") + "). Para leer PDF hace falta conexión a internet.");
         }
