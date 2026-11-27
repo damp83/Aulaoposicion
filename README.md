@@ -36,7 +36,7 @@ El progreso se guarda en el `localStorage` del navegador; usa *Progreso → Copi
 
 ## Temas propios incluidos en la plataforma
 
-`js/data-mis-temas.js` contiene los temas elaborados por la persona opositora que ya forman parte de la plataforma: los 32 temas específicos de Química (480 preguntas, cada respuesta cotejada con el solucionario de su PDF). En esos temas no se usan las preguntas de ejemplo de `js/data-quimica.js`, que solo se conserva como respaldo. Para añadir otro: impórtalo en la sección *Importar*, exporta la copia de seguridad y copia en ese archivo el tema correspondiente de `temas`.
+`js/data-mis-temas.js` contiene los temas elaborados por la persona opositora que ya forman parte de la plataforma: los 15 temas del temario común (225 preguntas) y los 32 temas específicos de Química (480 preguntas); cada respuesta se ha cotejado con el solucionario de su PDF. En esos temas no se usan las preguntas de ejemplo de `js/data.js` ni de `js/data-quimica.js`, que solo se conservan como respaldo. Para añadir otro: impórtalo en la sección *Importar*, exporta la copia de seguridad y copia en ese archivo el tema correspondiente de `temas`.
 
 ## Lectura de PDF
 

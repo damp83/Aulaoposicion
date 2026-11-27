@@ -304,7 +304,7 @@
       return `<li><strong>${esc(fila[1])}</strong><ul class="subideas">${partes.join("")}</ul></li>`;
     }
     const m = r.match(/^([^:]{2,45}): (.+)$/);
-    return m && !/[.;]/.test(m[1]) ? `<li><strong>${esc(m[1])}:</strong> ${esc(m[2])}</li>` : `<li>${esc(r)}</li>`;
+    return m && !/;|\.\s+[A-ZÁÉÍÓÚÑ]/.test(m[1]) ? `<li><strong>${esc(m[1])}:</strong> ${esc(m[2])}</li>` : `<li>${esc(r)}</li>`;
   }
 
   function renderTema(id) {
@@ -968,7 +968,12 @@
       const porCol = cols.map(() => []);
       its.forEach((it) => porCol[colOf(it.x)].push(it));
       const primera = joinItems(porCol[0]);
-      const nueva = primera && !/^[a-záéíóúüñ(]/.test(primera);
+      // Si solo hay texto en la primera columna, es la segunda línea de esa celda (no una fila nueva)
+      const soloPrimera = primera && porCol.slice(1).every((g) => !g.length);
+      // También continúa si la celda anterior de la primera columna dejó un paréntesis abierto («(art.» → «12)»)
+      const prev0 = filas.length ? filas[filas.length - 1][0] : "";
+      const abierto = (prev0.match(/\(/g) || []).length > (prev0.match(/\)/g) || []).length;
+      const nueva = primera && !soloPrimera && !abierto && !/^[a-záéíóúüñ(]/.test(primera);
       if (nueva || !filas.length) filas.push(cols.map(() => ""));
       const fila = filas[filas.length - 1];
       porCol.forEach((g, k) => { const t = joinItems(g); if (t) fila[k] = (fila[k] ? fila[k] + " " : "") + t; });
@@ -990,12 +995,18 @@
     // Número de tema: cabecera «Tema 3 · …» o número suelto en la portada
     let num = null, tm = lines.join("\n").match(/\bTema\s+(\d{1,2})\s*[·\-–:]/);
     if (tm) num = parseInt(tm[1], 10);
-    const coverIdx = lines.slice(0, 15).findIndex((l) => /^\d{1,2}$/.test(l));
-    if (num === null && coverIdx >= 0) num = parseInt(lines[coverIdx], 10);
+    // Portada: número suelto («3») o con la letra del bloque («C1» parte común, «Q3» química)
+    const coverIdx = lines.slice(0, 15).findIndex((l) => /^[CQA]?\d{1,2}$/i.test(l));
+    const coverM = coverIdx >= 0 ? lines[coverIdx].match(/^([CQA]?)(\d{1,2})$/i) : null;
+    if (num === null && coverM) num = parseInt(coverM[2], 10);
     // Bloque: la cabecera y la portada mandan («Química (M2)», «Especialidad de Química», «parte específica»);
     // la ficha del tema puede citar el «temario común» sin que el tema lo sea.
     let bloque = null;
-    if (/qu[ií]mica\s*\(M2\)|especialidad de qu[ií]mica|parte espec[ií]fica/i.test(head)) bloque = "q";
+    const todo = lines.join("\n");
+    if (coverM && coverM[1]) bloque = coverM[1].toLowerCase();
+    else if (/parte com[uú]n\s*·\s*tema\s+\d/i.test(todo)) bloque = "c";
+    else if (/qu[ií]mica\s*\(M2\)\s*·?\s*tema\s+\d|qu[ií]mica\s*\(M2\)/i.test(head)) bloque = "q";
+    else if (/especialidad de qu[ií]mica|parte espec[ií]fica/i.test(head)) bloque = "q";
     else if (/parte com[uú]n|temario com[uú]n|organizaci[oó]n y funcionamiento/i.test(head)) bloque = "c";
     else if (/qu[ií]mica/i.test(head)) bloque = "q";
     let id = num && bloque ? bloque + String(num).padStart(2, "0") : null;
